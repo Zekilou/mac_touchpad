@@ -209,3 +209,34 @@ cd "/Users/zekiwithcat/Documents/Obsidian Vault/mac_touchpad"
 swift run TouchpadGestures
 ```
 菜单栏 App，点击菜单栏图标可打开配置界面。首次运行在「系统设置 → 隐私与安全性 → 输入监控」里授予 Terminal 权限。
+
+## 分发构建（scripts/build_app.sh）
+- `swift build -c release` 编译 release 版本
+- 组装 .app bundle：Contents/MacOS/可执行文件 + Contents/Info.plist + Contents/Resources/AppIcon.icns + Contents/PkgInfo
+- Info.plist 关键字段：
+  - `CFBundleIdentifier` = com.zekiwithcat.TouchpadGestures
+  - `LSUIElement` = true（菜单栏 App，不在 Dock 显示）
+  - `LSMinimumSystemVersion` = 12.0
+  - `NSInputMonitoringUsageDescription` = 输入监控权限说明
+- 图标生成：Swift 脚本渲染 SF Symbol 'hand.tap' 到 1024x1024 PNG（白色填充），sips 生成多倍率 iconset，iconutil 转 icns
+- **Ad-hoc 签名**：`codesign --force --deep --sign -` 消除 "已损坏" 提示
+  - 未签名 app 从网络下载会被 Gatekeeper 加 com.apple.quarantine 属性，显示 "已损坏"
+  - ad-hoc 签名后仍会提示 "无法验证开发者"，用户需右键打开或执行 `xattr -cr`
+- 打包：`ditto -c -k --keepParent` 生成 zip
+
+## GitHub Release
+- 仓库：https://github.com/Zekilou/mac_touchpad.git
+- Release v1.0.0：https://github.com/Zekilou/mac_touchpad/releases/tag/v1.0.0
+- 资源：TouchpadGestures.zip（含 .app bundle）
+- 仓库描述：「macOS 菜单栏 App：双击触控板边缘 + 保持 + 上下滑动调节音量/亮度，带刻度震动反馈。基于 MultitouchSupport 私有框架。」
+- README 含：功能、系统要求、下载安装、使用方法、手势流程图、配置参数表、技术实现、致谢 mactic、风险声明
+- LICENSE：MIT
+- Release notes 明确告知用户：解压后执行 `xattr -cr /path/to/TouchpadGestures.app` 清除 quarantine 属性
+
+## 用户首次打开流程（重要）
+1. 下载 TouchpadGestures.zip 解压
+2. 若提示 "已损坏" 或 "无法验证开发者"：
+   - 方法一：终端执行 `xattr -cr /path/to/TouchpadGestures.app`
+   - 方法二：右键 → 打开（绕过 Gatekeeper）
+3. 拖入「应用程序」文件夹
+4. 首次运行在「系统设置 → 隐私与安全性 → 输入监控」授予权限

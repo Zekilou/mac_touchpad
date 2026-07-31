@@ -54,6 +54,13 @@ let package = Package(
                 .linkedFramework("CoreFoundation"),
                 .linkedLibrary("dl")
             ]
+        ),
+
+        // 单元测试
+        .testTarget(
+            name: "GestureEngineTests",
+            dependencies: ["GestureEngine"],
+            path: "Tests/GestureEngineTests"
         )
     ]
 )
