@@ -113,6 +113,21 @@ cd "$OUTPUT_DIR"
 rm -f "$APP_NAME.zip"
 ditto -c -k --keepParent "$APP_NAME.app" "$APP_NAME.zip"
 
+# 解压后会出现 "已损坏" 提示：未签名 + com.apple.quarantine 属性导致 Gatekeeper 拦截
+# ad-hoc 签名可消除 "damaged" 提示（仍会提示"无法验证开发者"，用户右键打开即可）
+echo "==> Ad-hoc 签名 (消除 damaged 提示)"
+codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tail -5 || echo "[warn] codesign 失败"
+codesign --verify --verbose=1 "$APP_BUNDLE" 2>&1 | tail -3 || true
+
+# 重新打包签名后的版本
+rm -f "$APP_NAME.zip"
+ditto -c -k --keepParent "$APP_NAME.app" "$APP_NAME.zip"
+
 echo "==> 完成"
 echo "    App:   $APP_BUNDLE"
 echo "    Zip:   $OUTPUT_DIR/$APP_NAME.zip"
+echo ""
+echo "    用户首次打开方式："
+echo "    1. 解压 zip"
+echo "    2. 终端执行: xattr -cr TouchpadGestures.app"
+echo "    3. 或右键 → 打开（绕过 Gatekeeper）"
