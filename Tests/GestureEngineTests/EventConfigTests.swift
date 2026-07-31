@@ -47,28 +47,37 @@ final class EventConfigTests: XCTestCase {
     // MARK: - DirectionRule
 
     func testDirectionRule_allCasesCount() {
-        // upIncrease + upDecrease = 2
+        // positiveIncrease + positiveDecrease = 2
         XCTAssertEqual(DirectionRule.allCases.count, 2)
     }
 
-    func testDirectionRule_mapSlidingDirection() {
-        // 上滑（dy 负）/ 下滑（dy 正）两种物理方向
-        let upDy: Float = -0.02
-        let downDy: Float = 0.02
+    func testDirectionRule_mapSignalDirection() {
+        // 信号增（normY 增大 = 下滑）/ 信号减（normY 减小 = 上滑）
+        let signalIncrease: Float = +0.02
+        let signalDecrease: Float = -0.02
 
-        let volumeUpInc = EventConfig.defaultVolume  // directionRule = .upIncrease
-        XCTAssertEqual(volumeUpInc.directionRule, .upIncrease)
-        // 上滑 = 增 → +1
-        XCTAssertEqual(volumeUpInc.mapSlidingDirection(dy: upDy), 1, "upIncrease + 上滑 应等于增")
-        // 下滑 = 减 → -1
-        XCTAssertEqual(volumeUpInc.mapSlidingDirection(dy: downDy), -1, "upIncrease + 下滑 应等于减")
+        // positiveDecrease：信号增=值减，信号减=值增
+        // —— 对应旧 upIncrease：上滑(normY减小=信号减小)=值增
+        let dec = DirectionRule.positiveDecrease
+        XCTAssertEqual(dec.mapSignalDirection(signalIncrease), -1, "positiveDec + 信号增 = 值减")
+        XCTAssertEqual(dec.mapSignalDirection(signalDecrease), +1, "positiveDec + 信号减 = 值增")
 
-        var volumeUpDec = volumeUpInc
-        volumeUpDec.directionRule = .upDecrease
-        // 上滑 = 减 → -1
-        XCTAssertEqual(volumeUpDec.mapSlidingDirection(dy: upDy), -1, "upDecrease + 上滑 应等于减")
-        // 下滑 = 增 → +1
-        XCTAssertEqual(volumeUpDec.mapSlidingDirection(dy: downDy), 1, "upDecrease + 下滑 应等于增")
+        // positiveIncrease：信号增=值增，信号减=值减
+        let inc = DirectionRule.positiveIncrease
+        XCTAssertEqual(inc.mapSignalDirection(signalIncrease), +1, "positiveInc + 信号增 = 值增")
+        XCTAssertEqual(inc.mapSignalDirection(signalDecrease), -1, "positiveInc + 信号减 = 值减")
+    }
+
+    func testDirectionRule_legacyDecode_mapsCorrectly() throws {
+        // 旧 upIncrease JSON 字符串 → 解码为 positiveDecrease
+        let json1 = "\"upIncrease\"".data(using: .utf8)!
+        let r1 = try JSONDecoder().decode(DirectionRule.self, from: json1)
+        XCTAssertEqual(r1, .positiveDecrease)
+
+        // 旧 upDecrease → 解码为 positiveIncrease
+        let json2 = "\"upDecrease\"".data(using: .utf8)!
+        let r2 = try JSONDecoder().decode(DirectionRule.self, from: json2)
+        XCTAssertEqual(r2, .positiveIncrease)
     }
 
     // MARK: - Default Events
@@ -78,14 +87,15 @@ final class EventConfigTests: XCTestCase {
         XCTAssertEqual(EventConfig.defaultVolume.actionType, .volume)
         XCTAssertEqual(EventConfig.defaultVolume.step, 0.0125)
         XCTAssertEqual(EventConfig.defaultVolume.boundaryThreshold, 0.001)
-        XCTAssertEqual(EventConfig.defaultVolume.directionRule, .upIncrease)
+        // 默认对齐旧 upIncrease → positiveDecrease
+        XCTAssertEqual(EventConfig.defaultVolume.directionRule, .positiveDecrease)
         XCTAssertEqual(EventConfig.defaultVolume.executionMethod, .mediaKey)
 
         // brightness
         XCTAssertEqual(EventConfig.defaultBrightness.actionType, .brightness)
         XCTAssertEqual(EventConfig.defaultBrightness.step, 0.0125)
         XCTAssertEqual(EventConfig.defaultBrightness.boundaryThreshold, 0.001)
-        XCTAssertEqual(EventConfig.defaultBrightness.directionRule, .upIncrease)
+        XCTAssertEqual(EventConfig.defaultBrightness.directionRule, .positiveDecrease)
         XCTAssertEqual(EventConfig.defaultBrightness.executionMethod, .mediaKey)
     }
 
@@ -97,13 +107,13 @@ final class EventConfigTests: XCTestCase {
             actionType: .volume,
             step: 0.05,
             boundaryThreshold: 0.01,
-            directionRule: .upDecrease,
+            directionRule: .positiveIncrease,
             executionMethod: .direct
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(EventConfig.self, from: data)
         XCTAssertEqual(original, decoded)
-        XCTAssertEqual(decoded.directionRule, .upDecrease)
+        XCTAssertEqual(decoded.directionRule, .positiveIncrease)
         XCTAssertEqual(decoded.executionMethod, .direct)
     }
 
@@ -119,11 +129,28 @@ final class EventConfigTests: XCTestCase {
         }
         """.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(EventConfig.self, from: json)
-        // 缺字段 → 默认值
-        XCTAssertEqual(decoded.directionRule, .upIncrease)
+        // 缺字段 → 默认值：positiveDecrease（对齐旧 upIncrease）+ mediaKey
+        XCTAssertEqual(decoded.directionRule, .positiveDecrease)
         XCTAssertEqual(decoded.executionMethod, .mediaKey)
         XCTAssertEqual(decoded.name, "旧配置音量")
         XCTAssertEqual(decoded.step, 0.0125)
+    }
+
+    func testCodable_legacyUpIncreaseString_decodesAsPositiveDecrease() throws {
+        // 旧 JSON 里 directionRule = "upIncrease"
+        let json = """
+        {
+          "id": "E621E1F8-C36C-495A-93FC-0C247A3E6E5F",
+          "name": "v1.1 配置",
+          "actionType": "volume",
+          "step": 0.0125,
+          "boundaryThreshold": 0.001,
+          "directionRule": "upIncrease",
+          "executionMethod": "mediaKey"
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(EventConfig.self, from: json)
+        XCTAssertEqual(decoded.directionRule, .positiveDecrease)
     }
 
     // MARK: - Boundary Detection

@@ -1,7 +1,7 @@
 import SwiftUI
 import GestureEngine
 
-/// 手势 tab 内容区：绑定事件/区域 + 触发参数 + 所有震动
+/// 手势 tab 内容区：绑定事件/区域 + 触发参数 + 信号处理 + 结构化触觉
 struct GestureTabView: View {
     @Binding var config: AppConfig
     @Binding var selectedGestureID: UUID?
@@ -98,67 +98,117 @@ struct GestureTabView: View {
                             Text(String(format: "%.2f", config.gestures[idx].holdMinDuration))
                                 .monospacedDigit().frame(width: 50, alignment: .trailing)
                         }
+                    }
+
+                    // ---------- 新增：信号处理卡片（v2 管线）----------
+                    Card(title: L10n.tr("信号处理管线", "Signal Pipeline")) {
+                        // 信号源
                         HStack {
-                            Text(L10n.tr("进入反馈波形", "Enter Haptic Waveform"))
+                            Text(L10n.tr("信号源", "Signal Source"))
                                 .frame(width: 150, alignment: .leading)
-                            Stepper(value: Binding(
+                            Picker(L10n.tr("信号源", "Signal Source"), selection: Binding(
+                                get: { config.gestures[idx].signalSource },
+                                set: { config.gestures[idx].signalSource = $0 }
+                            )) {
+                                ForEach(SignalSource.allCases, id: \.self) { s in
+                                    Text(s.displayName).tag(s)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            Spacer()
+                        }
+                        // 变换方式
+                        HStack {
+                            Text(L10n.tr("变换方式", "Transform"))
+                                .frame(width: 150, alignment: .leading)
+                            Picker(L10n.tr("变换方式", "Transform"), selection: Binding(
+                                get: { config.gestures[idx].transformMode },
+                                set: { config.gestures[idx].transformMode = $0 }
+                            )) {
+                                ForEach(TransformMode.allCases, id: \.self) { t in
+                                    Text(t.displayName).tag(t)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            Spacer()
+                        }
+                        // 量化模式
+                        HStack {
+                            Text(L10n.tr("量化模式", "Trigger Mode"))
+                                .frame(width: 150, alignment: .leading)
+                            Picker(L10n.tr("量化模式", "Trigger Mode"), selection: Binding(
+                                get: { config.gestures[idx].triggerMode },
+                                set: { config.gestures[idx].triggerMode = $0 }
+                            )) {
+                                ForEach(TriggerMode.allCases, id: \.self) { t in
+                                    Text(t.displayName).tag(t)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            Spacer()
+                        }
+                        // stepNorm（离散模式显示）
+                        if config.gestures[idx].triggerMode == .discrete {
+                            HStack {
+                                Text(L10n.tr("步进间距 (stepNorm)", "Step (norm)"))
+                                    .frame(width: 150, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(config.gestures[idx].stepNorm) },
+                                    set: { config.gestures[idx].stepNorm = Float($0) }
+                                ), in: 0.005...0.05)
+                                Text(String(format: "%.3f", config.gestures[idx].stepNorm))
+                                    .monospacedDigit().frame(width: 50, alignment: .trailing)
+                            }
+                        }
+                        // sensitivity（连续模式显示）
+                        if config.gestures[idx].triggerMode == .continuous {
+                            HStack {
+                                Text(L10n.tr("灵敏度", "Sensitivity"))
+                                    .frame(width: 150, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(config.gestures[idx].sensitivity) },
+                                    set: { config.gestures[idx].sensitivity = Float($0) }
+                                ), in: 0.1...10.0)
+                                Text(String(format: "%.1fx", config.gestures[idx].sensitivity))
+                                    .monospacedDigit().frame(width: 50, alignment: .trailing)
+                            }
+                        }
+                    }
+
+                    // ---------- 重构：结构化触觉反馈（4 行）----------
+                    Card(title: L10n.tr("触觉反馈", "Haptic Feedback")) {
+                        HapticRow(
+                            label: L10n.tr("进入 holding", "Enter Holding"),
+                            event: Binding(
                                 get: { config.gestures[idx].hapticEnter },
                                 set: { config.gestures[idx].hapticEnter = $0 }
-                            ), in: 1...16) {
-                                Text("\(config.gestures[idx].hapticEnter)")
-                            }
-                            Spacer()
-                        }
-                    }
-
-                    // 滑动调节
-                    Card(title: L10n.tr("滑动调节", "Slide Adjust")) {
-                        HStack {
-                            Text(L10n.tr("滑动刻度", "Slide Step Norm"))
-                                .frame(width: 150, alignment: .leading)
-                            Slider(value: Binding(
-                                get: { Double(config.gestures[idx].slideStepNorm) },
-                                set: { config.gestures[idx].slideStepNorm = Float($0) }
-                            ), in: 0.005...0.05)
-                            Text(String(format: "%.3f", config.gestures[idx].slideStepNorm))
-                                .monospacedDigit().frame(width: 50, alignment: .trailing)
-                        }
-                        HStack {
-                            Text(L10n.tr("刻度反馈波形", "Tick Haptic Waveform"))
-                                .frame(width: 150, alignment: .leading)
-                            Stepper(value: Binding(
+                            ),
+                            reset: { config.gestures[idx].hapticEnter = .enter }
+                        )
+                        HapticRow(
+                            label: L10n.tr("滑动刻度", "Tick"),
+                            event: Binding(
                                 get: { config.gestures[idx].hapticTick },
                                 set: { config.gestures[idx].hapticTick = $0 }
-                            ), in: 1...16) {
-                                Text("\(config.gestures[idx].hapticTick)")
-                            }
-                            Spacer()
-                        }
-                    }
-
-                    // 边界震动
-                    Card(title: L10n.tr("边界震动", "Boundary Haptic")) {
-                        HStack {
-                            Text(L10n.tr("边界强震动波形", "Boundary Haptic Waveform"))
-                                .frame(width: 150, alignment: .leading)
-                            Stepper(value: Binding(
+                            ),
+                            reset: { config.gestures[idx].hapticTick = .tick }
+                        )
+                        HapticRow(
+                            label: L10n.tr("到达边界", "Boundary"),
+                            event: Binding(
                                 get: { config.gestures[idx].hapticBoundary },
                                 set: { config.gestures[idx].hapticBoundary = $0 }
-                            ), in: 1...16) {
-                                Text("\(config.gestures[idx].hapticBoundary)")
-                            }
-                            Spacer()
-                        }
-                        HStack {
-                            Text(L10n.tr("边界震动间隔 (ms)", "Boundary Haptic Interval (ms)"))
-                                .frame(width: 150, alignment: .leading)
-                            Slider(value: Binding(
-                                get: { Double(config.gestures[idx].boundaryHapticInterval) / 1000.0 },
-                                set: { config.gestures[idx].boundaryHapticInterval = Int32($0 * 1000) }
-                            ), in: 10...200)
-                            Text(String(format: "%.0f", Double(config.gestures[idx].boundaryHapticInterval) / 1000.0))
-                                .monospacedDigit().frame(width: 50, alignment: .trailing)
-                        }
+                            ),
+                            reset: { config.gestures[idx].hapticBoundary = .boundary }
+                        )
+                        HapticRow(
+                            label: L10n.tr("退出 holding", "Exit Holding"),
+                            event: Binding(
+                                get: { config.gestures[idx].hapticExit },
+                                set: { config.gestures[idx].hapticExit = $0 }
+                            ),
+                            reset: { config.gestures[idx].hapticExit = .exit }
+                        )
                     }
 
                     // 鼠标控制
@@ -183,5 +233,81 @@ struct GestureTabView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
         }
+    }
+}
+
+// MARK: - 触觉单行：开关 + 波形 + 次数 + 间隔(可选) + 重置
+
+/// 单行 HapticEvent 编辑组件
+private struct HapticRow: View {
+    let label: String
+    @Binding var event: HapticEvent
+    let reset: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                // 开关 + 标签
+                Toggle(isOn: Binding(
+                    get: { event.enabled },
+                    set: { event.enabled = $0 }
+                )) {
+                    Text(label).frame(width: 130, alignment: .leading)
+                }
+                .toggleStyle(.switch)
+                .disabled(false)
+
+                // 波形 Stepper
+                Text(L10n.tr("波形", "Wave"))
+                    .font(.caption).foregroundStyle(.secondary)
+                Stepper(value: Binding(
+                    get: { Int(event.waveform) },
+                    set: { event.waveform = Int32(max(1, min(16, $0))) }
+                ), in: 1...16) {
+                    Text("\(event.waveform)").monospacedDigit().frame(width: 22)
+                }
+                .disabled(!event.enabled)
+
+                // 次数 Stepper
+                Text(L10n.tr("次", "×"))
+                    .font(.caption).foregroundStyle(.secondary)
+                Stepper(value: Binding(
+                    get: { event.count },
+                    set: { event.count = max(1, min(5, $0)) }
+                ), in: 1...5) {
+                    Text("\(event.count)").monospacedDigit().frame(width: 18)
+                }
+                .disabled(!event.enabled)
+
+                Spacer()
+
+                // 重置按钮
+                Button {
+                    reset()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise.circle")
+                }
+                .buttonStyle(.borderless)
+                .help(L10n.tr("恢复默认", "Reset to default"))
+            }
+
+            // 间隔（仅 count > 1 时显示）
+            if event.enabled && event.count > 1 {
+                HStack {
+                    Spacer().frame(width: 160)
+                    Text(L10n.tr("间隔 (ms)", "Interval (ms)"))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Slider(value: Binding(
+                        get: { Double(event.intervalUs) / 1000.0 },
+                        set: { event.intervalUs = Int32(max(0, min(200000, Int32($0 * 1000)))) }
+                    ), in: 0...200)
+                    .frame(maxWidth: 240)
+                    Text(String(format: "%.0f", Double(event.intervalUs) / 1000.0))
+                        .monospacedDigit().frame(width: 36, alignment: .trailing)
+                        .font(.caption)
+                }
+            }
+        }
+        .opacity(event.enabled ? 1.0 : 0.55)
     }
 }

@@ -77,18 +77,22 @@ public enum ConfigStore {
             name: "左侧", regionID: left.id, eventID: brightness.id,
             tapMaxDuration: v1.tapMaxDuration, tapMaxDrift: v1.tapMaxDrift,
             tapMaxGap: v1.tapMaxGap, holdMinDuration: v1.holdMinDuration,
-            slideStepNorm: v1.brightnessStepNorm,
             disassociateMouse: v1.disassociateMouse,
-            hapticEnter: v1.hapticEnter, hapticTick: v1.hapticTick,
-            hapticBoundary: v1.hapticBoundary, boundaryHapticInterval: v1.boundaryHapticInterval)
+            stepNorm: v1.brightnessStepNorm,
+            hapticEnter: HapticEvent(enabled: true, waveform: v1.hapticEnter, count: 1, intervalUs: 0),
+            hapticTick: HapticEvent(enabled: true, waveform: v1.hapticTick, count: 1, intervalUs: 0),
+            hapticBoundary: HapticEvent(enabled: true, waveform: v1.hapticBoundary, count: 2, intervalUs: v1.boundaryHapticInterval),
+            hapticExit: .exit)
         let rightGesture = GestureConfig(
             name: "右侧", regionID: right.id, eventID: volume.id,
             tapMaxDuration: v1.tapMaxDuration, tapMaxDrift: v1.tapMaxDrift,
             tapMaxGap: v1.tapMaxGap, holdMinDuration: v1.holdMinDuration,
-            slideStepNorm: v1.volumeStepNorm,
             disassociateMouse: v1.disassociateMouse,
-            hapticEnter: v1.hapticEnter, hapticTick: v1.hapticTick,
-            hapticBoundary: v1.hapticBoundary, boundaryHapticInterval: v1.boundaryHapticInterval)
+            stepNorm: v1.volumeStepNorm,
+            hapticEnter: HapticEvent(enabled: true, waveform: v1.hapticEnter, count: 1, intervalUs: 0),
+            hapticTick: HapticEvent(enabled: true, waveform: v1.hapticTick, count: 1, intervalUs: 0),
+            hapticBoundary: HapticEvent(enabled: true, waveform: v1.hapticBoundary, count: 2, intervalUs: v1.boundaryHapticInterval),
+            hapticExit: .exit)
         return AppConfig(version: 2, global: global, regions: [left, right], gestures: [leftGesture, rightGesture], events: [volume, brightness])
     }
 

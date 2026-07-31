@@ -61,10 +61,10 @@ final class ConfigMigrationTests: XCTestCase {
         let v2 = ConfigStore.migrate(v1: v1)
 
         let rightGesture = v2.gestures.first { $0.name == "右侧" }!
-        XCTAssertEqual(rightGesture.slideStepNorm, 0.025)
+        XCTAssertEqual(rightGesture.stepNorm, 0.025)
 
         let leftGesture = v2.gestures.first { $0.name == "左侧" }!
-        XCTAssertEqual(leftGesture.slideStepNorm, 0.018)
+        XCTAssertEqual(leftGesture.stepNorm, 0.018)
     }
 
     func testV1Migration_bindingsCorrect() throws {

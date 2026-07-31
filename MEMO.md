@@ -600,26 +600,28 @@ public struct GestureConfig: ... {
 节点画布 UI 技术选型：**路线 C（Graphaello 第三方库）**，放弃纯 SwiftUI Canvas 自绘。
 理由：Graphaello 是 SwiftUI 原生语法，开箱即用连线/端口/命中/缩放，半天集成节省 3-5 天手写 Canvas 成本。
 
-| 阶段 | 目标 | 交付物 | 工作量 |
-|------|------|--------|--------|
-| **M1：v2 线性管线落地** | 先把 MEMO 6 阶段线性管线写完 | Pipeline.swift + Config 迁移 + 引擎重写 + 卡片 UI | 中等（1-2天）|
-| **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）|
-| **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）|
-| **M4-C：Graphaello 画布 UI** | Package.swift 加 Graphaello 依赖 → 工具箱面板 → 节点 Port 映射 → 画布拖放连线 → Inspector 弹层 | Views/TimelineCanvas/ + SPM 依赖更新 | 中等（1-2天）|
-| **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 |
-| **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 |
+| 阶段 | 目标 | 交付物 | 工作量 | 状态 |
+|------|------|--------|--------|------|
+| **M1：v2 线性管线落地** | 先把 MEMO 6 阶段线性管线写完 | Pipeline.swift + Config 迁移 + 引擎重写 + 卡片 UI | 中等（1-2天）| **✓ 已完成**（2026-08-01，swift build + 22 tests 通过）|
+| **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）| 待办 |
+| **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）| 待办 |
+| **M4-C：Graphaello 画布 UI** | Package.swift 加 Graphaello 依赖 → 工具箱面板 → 节点 Port 映射 → 画布拖放连线 → Inspector 弹层 | Views/TimelineCanvas/ + SPM 依赖更新 | 中等（1-2天）| 待办 |
+| **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 | 待办 |
+| **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 | 待办 |
 
 ---
 
-### 改动清单（按依赖顺序，先做 M1 线性管线）
-1. 新建 `Sources/GestureEngine/Models/Pipeline.swift`：SignalSource, TransformMode, TriggerMode, GestureOutput, BoundaryResult, HapticEvent
-2. 改 `GestureConfig.swift`：新增 5 字段 + 4 个 HapticEvent，Codable 迁移
-3. 改 `EventConfig.swift`：新增 consume(output:)，废弃 perform/postBoundaryKey/mapSlidingDirection，DirectionRule 语义升级
-4. 改 `GestureEngine.swift`：holding 分支重写 + triggerHaptic 非阻塞 + frozen 解冻
-5. 改 `SystemControl.swift`：删除死代码 adjustVolume/adjustBrightness
-6. 改 `GestureTabView.swift`：新增信号处理卡片 + 重构触觉反馈卡片
-7. 改 `EventTabView.swift`：step 条件禁用 + directionRule 文案更新
-8. 测试：Pipeline 模型测试 + consume 各种 output×method 组合 + Codable 迁移 + frozen 解冻
+### M1 交付清单（已完成，2026-08-01）
+1. 新建 `Sources/GestureEngine/Models/Pipeline.swift`：SignalSource（normY/normX/size/pressure 从 mt_touch_t 提取）, TransformMode（delta/absolute）, TriggerMode（discrete/continuous）, GestureOutput（tick/direction+count / continuous+delta）, BoundaryResult（normal/hitBoundary/frozen）, HapticEvent（enabled/waveform/count/intervalUs）
+2. 改 `GestureConfig.swift`：新增 signalSource/transformMode/triggerMode/stepNorm/sensitivity 5 字段 + hapticEnter/hapticTick/hapticBoundary/hapticExit 4 个 HapticEvent；旧 slideStepNorm → stepNorm 自动改名；旧 Int32 haptic* 波形 ID → 封装为 HapticEvent(enabled:true, waveform:旧值)；新字段缺失时用默认值
+3. 改 `EventConfig.swift`：新增 `consume(output:)` 作为事件消费主入口，内部完成方向映射、边界预检（frozen→跳过）、执行调节（mediaKey 多次按键 / direct 精确加减）、边界后检（hitBoundary 判定 + HUD 唤起 postBoundaryKey）、返回 BoundaryResult；DirectionRule 从 Y 轴语义升级为信号源无关的 positiveIncrease / positiveDecrease，旧 JSON upIncrease/upDecrease 自动映射；旧 API perform/isAtBoundary/mapSlidingDirection/postBoundaryKey 标记 @available(*, deprecated)
+4. 改 `GestureEngine.swift`：holding 分支重写为 6 阶段管线（信号提取→变换→量化→输出→消费→震动）；triggerHaptic 改为 DispatchQueue.global().async 非阻塞执行多次震动；frozen 状态下反向滑动（delta 符号与 unfreezeDir 一致）自动解冻；GestureState 新增 startRaw 字段存储进入 holding 时的原始信号值
+5. 改 `SystemControl.swift`：删除 adjustVolume/adjustBrightness 死代码，保留 volumeUp/Down + setVolume/getVolume + brightnessUp/Down + setBrightness/getBrightness
+6. 改 `GestureTabView.swift`：新增「信号处理」卡片（SignalSource Picker + TransformMode Picker + TriggerMode Segmented + stepNorm Slider（离散时显示）+ sensitivity Slider（连续时显示））；重构「触觉反馈」卡片为 4 行 HapticRow（enter/tick/boundary/exit），每行含 enabled Toggle + waveform Stepper + count Stepper + intervalUs Slider（count>1 时显示）+ 单项 reset
+7. 改 `EventTabView.swift`：mediaKey 模式下 step Stepper 禁用（显示"系统档位"）；directionRule Picker 文案改为「信号增大→值增加 / 信号增大→值减少」
+8. 改 `HapticWaveformReference.swift`：用途列动态读取 HapticEvent.waveform 匹配
+9. 测试：swift build 通过；EventConfigTests consume 各种 output×method 组合 + ConfigMigrationTests slideStepNorm→stepNorm + RegionConfigTests，共 22 tests 全通过
+10. 修复：ConfigMigrationTests 中 slideStepNorm 引用改为 stepNorm
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)

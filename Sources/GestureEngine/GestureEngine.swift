@@ -4,7 +4,7 @@ import CoreGraphics
 import AppKit
 import mt_bridge
 
-/// 手势引擎：管理多个手势的状态机（字典版，v2）
+/// 手势引擎：管理多个手势的状态机（字典版，v2 全配置化管线）
 public final class GestureEngine {
 
     public var config: AppConfig {
@@ -44,12 +44,15 @@ public final class GestureEngine {
         }
 
         // 遍历所有手势
-        for gesture in config.gestures {
+        for i in 0..<config.gestures.count {
+            let gesture = config.gestures[i]
             guard let region = config.regions.first(where: { $0.id == gesture.regionID }),
-                  let event = config.events.first(where: { $0.id == gesture.eventID }) else { continue }
+                  let eventIndex = config.events.firstIndex(where: { $0.id == gesture.eventID }) else { continue }
             if states[gesture.id] == nil { states[gesture.id] = .idle }
-            processGesture(gesture, region: region, event: event,
-                           state: &states[gesture.id]!, touches: touches, now: now)
+            processGesture(gesture, region: region,
+                           event: &config.events[eventIndex],
+                           state: &states[gesture.id]!,
+                           touches: touches, now: now)
         }
 
         // 鼠标锁定：任意手势在 holding 即锁定
@@ -63,7 +66,8 @@ public final class GestureEngine {
 
     // MARK: - 单手势状态机
 
-    private func processGesture(_ gesture: GestureConfig, region: RegionConfig, event: EventConfig,
+    private func processGesture(_ gesture: GestureConfig, region: RegionConfig,
+                                 event: inout EventConfig,
                                  state: inout GestureState, touches: [mt_touch_t], now: Double) {
 
         func isSizeValid(_ t: mt_touch_t) -> Bool {
@@ -133,69 +137,127 @@ public final class GestureEngine {
                     state = .cooldown(pathIndex: pathIdx)
                     onStateChange?(gesture.name, state)
                 } else if now - startTime > gesture.holdMinDuration {
-                    let startY = edgeFinger?.norm_y ?? startPos.1
+                    let startRaw = gesture.signalSource.extract(from: edgeFinger ?? touches.first!)
                     let startVal = event.currentValue()
                     // 进入 holding 时若事件在边界，发送朝边界外的媒体键唤起 HUD
-                    if event.isAtAnyBoundary() {
-                        event.postBoundaryKey()
-                    }
-                    state = .holding(pathIndex: pathIdx, startY: startY, lastTickY: startY,
+                    event.postBoundaryKeyOnEnterIfNeeded()
+                    state = .holding(pathIndex: pathIdx,
+                                     startRaw: startRaw, lastTriggerVal: startRaw,
                                      ticks: 0, frozen: false, startValue: startVal)
-                    if deviceID != 0 { mt_actuate(deviceID, gesture.hapticEnter) }
+                    triggerHaptic(gesture.hapticEnter)
                     if gesture.disassociateMouse { disassociateMouse() }
                     onStateChange?(gesture.name, state)
                 }
             }
 
-        case .holding(let pathIdx, let startY, let lastTickY, let ticks, let frozen, let startValue):
+        case .holding(let pathIdx, let startRaw, let lastTriggerVal, let ticks, let frozen, let startValue):
             if !fingerStillThere(pathIdx) {
+                // 退出 → 触发 hapticExit
+                triggerHaptic(gesture.hapticExit)
                 associateMouse()
                 state = .idle
                 onStateChange?(gesture.name, state)
             } else if frozen {
-                break
-            } else if let f = edgeFinger, f.pathIndex == pathIdx {
-                let dy = f.norm_y - lastTickY
-                if abs(dy) >= gesture.slideStepNorm {
-                    // 用事件自己的 directionRule 把 dy → ±1（值增减方向）
-                    let direction = event.mapSlidingDirection(dy: dy)
-
-                    // canDetect: 进入时不在边界，API 可靠
-                    let canDetect = startValue > event.boundaryThreshold
-                        && startValue < 1.0 - event.boundaryThreshold
-                    var atBoundary = false
-                    if canDetect {
-                        atBoundary = event.isAtBoundary(direction: direction)
-                    }
-
-                    if atBoundary {
-                        // 滑动过程中到达边界，发媒体键唤起 HUD（值不变）
-                        event.perform(direction: direction)
-                        // 强震动 + 冻结
-                        if deviceID != 0 {
-                            mt_actuate(deviceID, gesture.hapticBoundary)
-                            usleep(useconds_t(gesture.boundaryHapticInterval))
-                            mt_actuate(deviceID, gesture.hapticBoundary)
-                        }
-                        state = .holding(pathIndex: pathIdx, startY: startY,
-                                         lastTickY: f.norm_y, ticks: ticks,
-                                         frozen: true, startValue: startValue)
-                    } else {
-                        // 正常调节
-                        event.perform(direction: direction)
-                        if deviceID != 0 { mt_actuate(deviceID, gesture.hapticTick) }
-                        state = .holding(pathIndex: pathIdx, startY: startY,
-                                         lastTickY: f.norm_y, ticks: ticks + 1,
-                                         frozen: false, startValue: startValue)
-                    }
+                // 冻结中：检查反向滑动是否解冻
+                guard let f = edgeFinger, f.pathIndex == pathIdx else { break }
+                let raw = gesture.signalSource.extract(from: f)
+                let signalDelta: Float
+                switch gesture.transformMode {
+                case .delta:    signalDelta = raw - lastTriggerVal
+                case .absolute: signalDelta = raw - startRaw
+                }
+                if abs(signalDelta) >= 0.5 * gesture.stepNorm,  // 至少动半个 step 才算有意图
+                   event.shouldUnfreeze(signalDelta: signalDelta, startValue: startValue) {
+                    state = .holding(pathIndex: pathIdx,
+                                     startRaw: startRaw, lastTriggerVal: raw,
+                                     ticks: ticks, frozen: false, startValue: startValue)
                     onStateChange?(gesture.name, state)
                 }
+            } else if let f = edgeFinger, f.pathIndex == pathIdx {
+                // --- 阶段1 + 2：提取信号 + 变换 ---
+                let raw = gesture.signalSource.extract(from: f)
+                let delta: Float
+                switch gesture.transformMode {
+                case .delta:
+                    delta = raw - lastTriggerVal
+                case .absolute:
+                    // absolute 模式：delta = 当前信号原始值（0~1 映射）
+                    delta = raw
+                }
+
+                // --- 阶段3：量化 → GestureOutput ---
+                guard let output = quantize(
+                    delta: delta,
+                    triggerMode: gesture.triggerMode,
+                    stepNorm: gesture.stepNorm,
+                    sensitivity: gesture.sensitivity,
+                    mapDirection: { event.directionRule.mapSignalDirection($0) }
+                ) else {
+                    break // 不满足触发条件
+                }
+
+                // --- 阶段5：事件消费（内部处理边界/冻结/HUD/调节）---
+                let result = event.consume(output: output)
+
+                // --- 阶段6：基于结果触发震动 ---
+                switch result {
+                case .normal:
+                    triggerHaptic(gesture.hapticTick)
+                case .hitBoundary:
+                    triggerHaptic(gesture.hapticBoundary)
+                case .frozen:
+                    break // 不动也不震
+                }
+
+                // --- 更新状态：lastTriggerVal 根据 triggerMode 推进 ---
+                let newLastTrigger: Float
+                var newTicks = ticks
+                switch output {
+                case .tick(_, let count):
+                    // discrete 模式：按 count 个 stepNorm 推进（多档补偿），避免余值累积丢刻度
+                    let sign: Float = (delta >= 0) ? 1.0 : -1.0
+                    newLastTrigger = lastTriggerVal + sign * Float(count) * gesture.stepNorm
+                    newTicks = ticks + count
+                case .continuous:
+                    newLastTrigger = raw
+                }
+
+                let newFrozen = (result == .hitBoundary) || (result == .frozen)
+                state = .holding(pathIndex: pathIdx,
+                                 startRaw: startRaw, lastTriggerVal: newLastTrigger,
+                                 ticks: newTicks, frozen: newFrozen, startValue: startValue)
+                onStateChange?(gesture.name, state)
             }
 
         case .cooldown(let pathIdx):
             if !fingerStillThere(pathIdx) {
                 state = .idle
                 onStateChange?(gesture.name, state)
+            }
+        }
+    }
+
+    // MARK: - 震动（非阻塞，多次震动用 async 后台）
+
+    /// 触发单个 HapticEvent 配置的震动
+    /// - 单个震动：直接调用 mt_actuate（同步，~ms 级）
+    /// - 多个震动：后台线程 async 执行，避免阻塞帧回调
+    private func triggerHaptic(_ h: HapticEvent) {
+        guard h.enabled, deviceID != 0 else { return }
+        let dev = deviceID
+        if h.count <= 1 {
+            mt_actuate(dev, Int32(h.waveform))
+        } else {
+            let wave = Int32(h.waveform)
+            let n = h.count
+            let us = UInt32(h.intervalUs)
+            DispatchQueue.global(qos: .userInitiated).async {
+                for i in 0..<n {
+                    mt_actuate(dev, wave)
+                    if i < n - 1 && us > 0 {
+                        usleep(us)
+                    }
+                }
             }
         }
     }

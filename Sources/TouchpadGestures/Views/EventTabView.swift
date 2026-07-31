@@ -36,13 +36,13 @@ struct EventTabView: View {
                         }
                     }
 
-                    // 2. 方向映射：上滑增 or 上滑减
+                    // 2. 方向映射：信号增 vs 目标值增减（语义升级为信号源无关）
                     Card(title: L10n.tr("方向映射", "Direction Mapping")) {
                         VStack(alignment: .leading, spacing: 8) {
-                            rowWithReset(tooltip: L10n.tr("恢复方向（上滑增加）", "Reset to Swipe-Up-Increase")) {
-                                config.events[idx].directionRule = .upIncrease
+                            rowWithReset(tooltip: L10n.tr("恢复默认（normY 上滑=增加）", "Reset default (normY swipe up = increase)")) {
+                                config.events[idx].directionRule = .positiveDecrease
                             } content: {
-                                Text(L10n.tr("滑动方向", "Swipe Rule"))
+                                Text(L10n.tr("方向规则", "Direction Rule"))
                                     .frame(width: 150, alignment: .leading)
                                 Picker(L10n.tr("方向规则", "Direction Rule"), selection: Binding(
                                     get: { config.events[idx].directionRule },
@@ -55,8 +55,8 @@ struct EventTabView: View {
                                 .pickerStyle(.segmented)
                                 .labelsHidden()
                             }
-                            Text(L10n.tr("触控板物理方向：向上滑动 = norm_y 减小，向下滑动 = norm_y 增大。",
-                                        "Trackpad physics: swipe up = norm_y decreases, swipe down = norm_y increases."))
+                            Text(L10n.tr("对 Y 轴（normY）：手指下滑 = 信号增大；positiveIncrease = 下滑=加，positiveDecrease = 上滑=加（= 旧 upIncrease）。对其他信号源同理，以「信号增减」为基准。",
+                                        "For Y-axis (normY): swipe down = signal increases. For other sources, use 'signal change' as the baseline."))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }

@@ -148,37 +148,4 @@ public enum SystemControl {
         return success
     }
 
-    // MARK: - 统一入口（按执行方式调节 step）
-
-    /// 按指定方式调节音量
-    /// - Parameters:
-    ///   - step: 增减量（正数），sign 由 direction 决定
-    ///   - direction: +1 = 增加，-1 = 减少
-    ///   - method: 媒体键 / 直接 API
-    @discardableResult
-    public static func adjustVolume(step: Float, direction: Int, method: ExecutionMethod) -> Bool {
-        switch method {
-        case .mediaKey:
-            if direction > 0 { volumeUp() } else { volumeDown() }
-            return true
-        case .direct:
-            let current = getVolume()
-            let target = max(0.0, min(1.0, current + Float(direction > 0 ? 1 : -1) * step))
-            return setVolume(target)
-        }
-    }
-
-    /// 按指定方式调节亮度
-    @discardableResult
-    public static func adjustBrightness(step: Float, direction: Int, method: ExecutionMethod) -> Bool {
-        switch method {
-        case .mediaKey:
-            if direction > 0 { brightnessUp() } else { brightnessDown() }
-            return true
-        case .direct:
-            let current = getBrightness()
-            let target = max(0.0, min(1.0, current + Float(direction > 0 ? 1 : -1) * step))
-            return setBrightness(target)
-        }
-    }
 }
