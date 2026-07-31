@@ -5,7 +5,7 @@ set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="TouchpadGestures"
-VERSION="1.0.0"
+VERSION="1.1.0"
 BUILD_NUM="1"
 OUTPUT_DIR="${1:-$PROJECT_DIR/dist}"
 
