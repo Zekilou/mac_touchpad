@@ -1,5 +1,14 @@
 # 项目备忘录
 
+## v1.1.0 架构变更（事件配置化重构）
+- 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
+- 状态机从 leftState/rightState 改为 `[UUID: GestureState]` 字典，每帧遍历所有手势
+- UI 从 2 栏变 4 栏一级 tab（手势/事件/区域/设置）+ 二级 tab 编辑模式（增删/重命名）
+- config.json v1→v2 自动迁移，行为一致
+- 模型文件在 `Sources/GestureEngine/Models/`，UI 组件在 `Sources/TouchpadGestures/Views/`
+- 单元测试在 `Tests/GestureEngineTests/`（13 个测试）
+- Release v1.1.0: https://github.com/Zekilou/mac_touchpad/releases/tag/v1.1.0
+
 ## 项目目标
 通过 Apple 私有 **MultitouchSupport.framework** 读取内置触控板的多点触摸结构化数据（96 字节/手指），识别「双击边缘 + 保持 + 垂直滑动」手势，最终做成菜单栏工具（SwiftUI）。
 
