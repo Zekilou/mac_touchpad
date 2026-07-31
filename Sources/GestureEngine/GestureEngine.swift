@@ -157,7 +157,8 @@ public final class GestureEngine {
             } else if let f = edgeFinger, f.pathIndex == pathIdx {
                 let dy = f.norm_y - lastTickY
                 if abs(dy) >= gesture.slideStepNorm {
-                    let direction: Int = dy > 0 ? 1 : -1  // norm_y 增大=下滑=增大
+                    // 用事件自己的 directionRule 把 dy → ±1（值增减方向）
+                    let direction = event.mapSlidingDirection(dy: dy)
 
                     // canDetect: 进入时不在边界，API 可靠
                     let canDetect = startValue > event.boundaryThreshold

@@ -1,9 +1,9 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 import PackageDescription
 
 let package = Package(
     name: "mac_touchpad",
-    platforms: [.macOS(.v12)],
+    platforms: [.macOS(.v15)],
     targets: [
         // IOKit HID 早期探索版本（保留作参考）
         .executableTarget(
@@ -62,5 +62,6 @@ let package = Package(
             dependencies: ["GestureEngine"],
             path: "Tests/GestureEngineTests"
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )

@@ -3,15 +3,6 @@ import GestureEngine
 import mt_bridge
 import CoreGraphics
 
-// MARK: - 国际化工具（根据系统语言中英切换，不依赖 .strings 文件加载）
-
-enum L10n {
-    static let isChinese: Bool = {
-        Locale.preferredLanguages.first?.hasPrefix("zh") ?? false
-    }()
-    static func tr(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
-}
-
 // MARK: - 软件设置
 
 struct AppSettings: Codable, Equatable {
@@ -61,16 +52,154 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         didSet { appSettings.save() }
     }
     @Published var showResetAllAlert = false
+
+    // MARK: - Config Management
+
+    @Published var config: AppConfig
+    @Published var selectedGestureID: UUID?
+    @Published var selectedEventID: UUID?
+    @Published var selectedRegionID: UUID?
+    @Published var currentEditingTab: PrimaryTab = .gestures
+    @Published var showRenameAlert = false
+    @Published var renameText = ""
+    @Published var showDeleteAlert = false
+    @Published var pendingDelete: DeleteTarget?
+
+    // MARK: - Init
+
+    override init() {
+        appSettings = AppSettings.load()
+        let cfg = ConfigStore.load()
+        config = cfg
+        super.init()
+        // 初始化选中项为首项，避免 TabView selection 为 nil 导致闪烁
+        selectedGestureID = cfg.gestures.first?.id
+        selectedEventID = cfg.events.first?.id
+        selectedRegionID = cfg.regions.first?.id
+    }
+
+    // MARK: - Config Edit Actions
+
+    var currentSecondaryID: UUID? {
+        switch currentEditingTab {
+        case .gestures: return selectedGestureID ?? config.gestures.first?.id
+        case .events:   return selectedEventID ?? config.events.first?.id
+        case .regions:  return selectedRegionID ?? config.regions.first?.id
+        case .settings: return nil
+        }
+    }
+
+    var currentSecondaryName: String? {
+        switch currentEditingTab {
+        case .gestures: return config.gestures.first { $0.id == selectedGestureID }?.name ?? config.gestures.first?.name
+        case .events:   return config.events.first { $0.id == selectedEventID }?.name ?? config.events.first?.name
+        case .regions:  return config.regions.first { $0.id == selectedRegionID }?.name ?? config.regions.first?.name
+        case .settings: return nil
+        }
+    }
+
+    var canDeleteSecondary: Bool {
+        switch currentEditingTab {
+        case .gestures: return config.gestures.count > 1
+        case .events:   return config.events.count > 1
+        case .regions:  return config.regions.count > 1
+        case .settings: return false
+        }
+    }
+
+    func addItem() {
+        switch currentEditingTab {
+        case .gestures:
+            guard let r = config.regions.first, let e = config.events.first else { return }
+            let g = GestureConfig(name: L10n.tr("新手势", "New Gesture"), regionID: r.id, eventID: e.id)
+            config.gestures.append(g); selectedGestureID = g.id
+        case .events:
+            let e = EventConfig(name: L10n.tr("新事件", "New Event"), actionType: .volume, step: 0.0125, boundaryThreshold: 0.001)
+            config.events.append(e); selectedEventID = e.id
+        case .regions:
+            let r = RegionConfig(name: L10n.tr("新区域", "New Region"), xMin: 0.4, xMax: 0.6, yMin: 0.4, yMax: 0.6)
+            config.regions.append(r); selectedRegionID = r.id
+        case .settings: break
+        }
+    }
+
+    func startRename() {
+        renameText = currentSecondaryName ?? ""
+        showRenameAlert = true
+    }
+
+    func performRename() {
+        let name = renameText.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, let id = currentSecondaryID else { return }
+        switch currentEditingTab {
+        case .gestures:
+            if let i = config.gestures.firstIndex(where: { $0.id == id }) { config.gestures[i].name = name }
+        case .events:
+            if let i = config.events.firstIndex(where: { $0.id == id }) { config.events[i].name = name }
+        case .regions:
+            if let i = config.regions.firstIndex(where: { $0.id == id }) { config.regions[i].name = name }
+        case .settings: break
+        }
+        renameText = ""
+    }
+
+    func requestDelete() {
+        guard let id = currentSecondaryID else { return }
+        switch currentEditingTab {
+        case .gestures:
+            config.gestures.removeAll { $0.id == id }
+            if selectedGestureID == id { selectedGestureID = config.gestures.first?.id }
+        case .events:
+            let bound = config.gestures.filter { $0.eventID == id }.count
+            if bound > 0 { pendingDelete = .event(id); showDeleteAlert = true }
+            else { performEventDelete(id) }
+        case .regions:
+            let bound = config.gestures.filter { $0.regionID == id }.count
+            if bound > 0 { pendingDelete = .region(id); showDeleteAlert = true }
+            else { performRegionDelete(id) }
+        case .settings: break
+        }
+    }
+
+    func performConfirmedDelete() {
+        guard let target = pendingDelete else { return }
+        switch target {
+        case .event(let id):  performEventDelete(id)
+        case .region(let id): performRegionDelete(id)
+        }
+        pendingDelete = nil
+    }
+
+    private func performEventDelete(_ id: UUID) {
+        guard let first = config.events.first(where: { $0.id != id }) else { return }
+        for i in 0..<config.gestures.count {
+            if config.gestures[i].eventID == id { config.gestures[i].eventID = first.id }
+        }
+        config.events.removeAll { $0.id == id }
+        if selectedEventID == id { selectedEventID = first.id }
+    }
+
+    private func performRegionDelete(_ id: UUID) {
+        guard let first = config.regions.first(where: { $0.id != id }) else { return }
+        for i in 0..<config.gestures.count {
+            if config.gestures[i].regionID == id { config.gestures[i].regionID = first.id }
+        }
+        config.regions.removeAll { $0.id == id }
+        if selectedRegionID == id { selectedRegionID = first.id }
+    }
+
+    func boundGestureCount(for target: DeleteTarget) -> Int {
+        switch target {
+        case .event(let id):  return config.gestures.filter { $0.eventID == id }.count
+        case .region(let id): return config.gestures.filter { $0.regionID == id }.count
+        }
+    }
+
     private var touchArrayPtr: UnsafeMutableRawPointer? = nil
     private var deviceCount: Int32 = 0
     private var firstDev: mt_device_t? = nil
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
-
-    override init() {
-        appSettings = AppSettings.load()
-        super.init()
-    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(appSettings.showInDock ? .regular : .accessory)
@@ -172,27 +301,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let hostingView = NSHostingView(rootView: ConfigView(config: engine.config)
+            let hostingView = NSHostingView(rootView: ConfigView()
                 .environmentObject(self))
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 680, height: 820),
-                styleMask: [.titled, .closable, .miniaturizable],
+                styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
                 backing: .buffered, defer: false)
-            window.title = L10n.tr("Touchpad Gestures 设置", "Touchpad Gestures Settings")
-            window.titleVisibility = .visible
-            window.titlebarAppearsTransparent = false
+            // 标题栏透明融入内容，整个窗口只有左右两栏
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
             window.contentView = hostingView
-
-            let titlebarView = NSHostingView(rootView:
-                ResetAllTitlebarButton { [weak self] in
-                    self?.showResetAllAlert = true
-                })
-            titlebarView.frame.size = NSSize(width: 110, height: 28)
-            let accessory = NSTitlebarAccessoryViewController()
-            accessory.view = titlebarView
-            accessory.layoutAttribute = .trailing
-            window.addTitlebarAccessoryViewController(accessory)
-
             window.center()
             settingsWindow = window
         }
@@ -208,8 +326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         NSApp.terminate(nil)
     }
 
-    func updateConfig(_ config: AppConfig) {
-        engine.config = config
+    func updateConfig(_ newConfig: AppConfig) {
+        config = newConfig
+        engine.config = newConfig
     }
 }
 
@@ -230,56 +349,4 @@ private let touchCallback: @convention(c) (
     delegate.engine.processFrame(touches: touchArray)
 }
 
-// MARK: - ConfigView（4 栏一级 tab）
-
-struct ConfigView: View {
-    @State var config: AppConfig
-    @EnvironmentObject var appDelegate: AppDelegate
-
-    var body: some View {
-        TabView {
-            GestureTabView(config: $config)
-                .tabItem { Text(L10n.tr("手势", "Gestures")) }
-
-            EventTabView(config: $config)
-                .tabItem { Text(L10n.tr("事件", "Events")) }
-
-            RegionTabView(config: $config)
-                .tabItem { Text(L10n.tr("区域", "Regions")) }
-
-            SettingsTabView(config: $config, appDelegate: appDelegate)
-                .tabItem { Text(L10n.tr("设置", "Settings")) }
-        }
-        .frame(width: 660, height: 780)
-        .onChange(of: config) { newConfig in
-            appDelegate.updateConfig(newConfig)
-        }
-        .alert(L10n.tr("确认重置全部配置？", "Reset all settings?"),
-               isPresented: $appDelegate.showResetAllAlert) {
-            Button(L10n.tr("取消", "Cancel"), role: .cancel) {}
-            Button(L10n.tr("重置", "Reset"), role: .destructive) {
-                config = ConfigStore.loadDefault()
-            }
-        } message: {
-            Text(L10n.tr("所有配置将恢复为默认值，此操作不可撤销。",
-                        "All settings will be restored to defaults. This cannot be undone."))
-        }
-    }
-}
-
-// MARK: - 标题栏全局重置按钮
-
-struct ResetAllTitlebarButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Label(L10n.tr("重置全部", "Reset All"), systemImage: "arrow.counterclockwise")
-                .labelStyle(.titleAndIcon)
-                .font(.system(size: 12))
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .help(L10n.tr("重置所有手势配置为默认值", "Reset all gesture settings to defaults"))
-    }
-}
+// ConfigView 已移至 Views/ConfigView.swift

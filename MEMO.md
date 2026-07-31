@@ -1,5 +1,626 @@
 # 项目备忘录
 
+## 全配置化数据处理管线规划（2026-08-01）
+
+### 设计目标
+从「原始触摸数据 → 哪个字段 → 怎么处理 → 给事件传什么 → 什么时候震动」全链路配置化。
+用户可以在 UI 里选择：用哪个轴的信号、怎么量化、传什么给事件、震动的时机和波形。
+
+### 现状问题（8 项）
+1. dy 大小被丢弃：引擎只传 direction: Int(±1)，滑动速度/幅度信息丢失
+2. step 在 mediaKey 模式下是死字段：UI 让调但 perform 的 mediaKey 分支不读
+3. 没有连续模式：只有离散刻度，无法做"dy 越大调越多"
+4. 快速滑动丢刻度：帧限频丢帧后 dy 跨多个 slideStepNorm，每帧只触发 1 次
+5. 边界逻辑分散：进入时 isAtAnyBoundary + postBoundaryKey 在引擎，滑动时 canDetect 也在引擎
+6. frozen 无解冻路径：到边界冻结后只能等手指抬起
+7. usleep(50ms) 阻塞帧处理
+8. 死代码：SystemControl.adjustVolume/adjustBrightness 从未被调用
+
+### 管线 6 个阶段
+
+```
+mt_touch_t 原始帧
+  │
+  ├─ [阶段1] 信号源选取（GestureConfig.signalSource）
+  │   配置：从 mt_touch_t 提取哪个字段作为主信号
+  │   .normY    → rawValue = f.norm_y        （默认：Y轴坐标）
+  │   .normX    → rawValue = f.norm_x        （X轴坐标）
+  │   .size     → rawValue = f.size          （接触面积）
+  │   .pressure → rawValue = f.zPressure     （压力）
+  │
+  ├─ [阶段2] 信号变换（GestureConfig.transformMode）
+  │   配置：怎么从 rawValue 产生变化量
+  │   .delta    → delta = rawValue - lastTriggerValue  （默认：相对差值）
+  │   .absolute → delta = rawValue                      （直接用绝对值，0~1映射）
+  │
+  ├─ [阶段3] 量化模式（GestureConfig.triggerMode）
+  │   配置：怎么把 delta 转成输出
+  │   .discrete:
+  │     |delta| >= stepNorm ?
+  │       是 → tickCount = floor(|delta| / stepNorm)
+  │            direction = sign(delta) 经 directionRule 映射
+  │            output = .tick(direction, count: tickCount)
+  │            lastTriggerValue += tickCount * stepNorm * sign(delta)
+  │       否 → 无输出
+  │   .continuous:
+  │     output = .continuous(delta * sensitivity)
+  │     lastTriggerValue = rawValue
+  │
+  ├─ [阶段4] 输出传递（GestureOutput — 引擎→事件的数据合同）
+  │   .tick(direction: Int, count: Int)   // 离散：值增减方向 + 跨了几个刻度
+  │   .continuous(delta: Float)            // 连续：带符号的变化量（已 ×sensitivity）
+  │
+  ├─ [阶段5] 事件消费（EventConfig.consume(output:) → BoundaryResult）
+  │   方向映射：directionRule 已在阶段3应用（positiveIncrease / positiveDecrease）
+  │   执行方式 + 步长：
+  │     mediaKey + .tick(dir, count)  → 发 count 次媒体键
+  │     mediaKey + .continuous(delta) → 退化：delta>0 发1次up，<0 发1次down
+  │     direct   + .tick(dir, count)  → current ± step * count → setVolume/Brightness
+  │     direct   + .continuous(delta) → current + delta → setVolume/Brightness
+  │   边界检测全封装在事件内部：
+  │     执行前读 currentValue，执行后 clamp 到 [0,1]
+  │     若到边界 → 返回 .hitBoundary（同时 postBoundaryKey 唤起 HUD）
+  │     若已在边界且继续朝边界外 → 返回 .frozen（不执行）
+  │     否则 → 返回 .normal
+  │
+  └─ [阶段6] 触觉反馈（HapticConfig — 在 GestureConfig 里，引擎层触发）
+      触发时机（可配置开关 + 波形 + 次数 + 间隔）：
+      .enter    → 进入 holding 时（默认：波形2 强click，1次）
+      .tick     → 每次正常刻度调节后（默认：波形4 中tap，1次）
+      .boundary → 到达边界时（默认：波形2 强click，2次，间隔50ms）
+      .exit     → 退出 holding 时（新增，默认：关闭）
+      引擎根据 BoundaryResult 决定触发哪个：
+        .normal      → 触发 .tick
+        .hitBoundary → 触发 .boundary
+        .frozen      → 不触发（已冻住）
+```
+
+### 新增模型定义
+
+#### 1. SignalSource（手势配置 — 阶段1）
+```swift
+/// 从 mt_touch_t 提取哪个字段作为控制信号
+enum SignalSource: String, Codable, CaseIterable {
+    case normY       // Y轴归一化坐标（默认）
+    case normX       // X轴归一化坐标
+    case size        // 接触面积
+    case pressure    // Z轴压力
+
+    /// 从 mt_touch_t 提取值
+    func extract(from t: mt_touch_t) -> Float {
+        switch self {
+        case .normY:    return t.norm_y
+        case .normX:    return t.norm_x
+        case .size:     return t.size
+        case .pressure: return t.zPressure
+        }
+    }
+
+    var displayName: String { ... }
+}
+```
+
+#### 2. TransformMode（手势配置 — 阶段2）
+```swift
+/// 信号变换方式
+enum TransformMode: String, Codable, CaseIterable {
+    case delta       // 相对于上次触发点的差值（默认）
+    case absolute    // 直接用绝对值（0~1映射到目标值）
+}
+```
+
+#### 3. TriggerMode（手势配置 — 阶段3）
+```swift
+/// 量化模式
+enum TriggerMode: String, Codable, CaseIterable {
+    case discrete    // 离散刻度：每达到 stepNorm 触发一次
+    case continuous  // 连续比例：delta × sensitivity 直接映射
+}
+```
+
+#### 4. GestureOutput（引擎→事件的数据合同 — 阶段4）
+```swift
+/// 手势引擎传递给事件的统一输出类型
+enum GestureOutput {
+    /// 离散刻度：direction=±1（已应用 directionRule），count=本次跨了几个刻度
+    case tick(direction: Int, count: Int)
+    /// 连续比例：带符号的变化量（已 ×sensitivity，可直接加减到系统值）
+    case continuous(delta: Float)
+}
+```
+
+#### 5. BoundaryResult（事件→引擎的反馈 — 阶段5）
+```swift
+/// 事件消费结果，告诉引擎发生了什么（用于决定震动）
+enum BoundaryResult {
+    case normal       // 正常调节了
+    case hitBoundary  // 到达边界，已发 HUD
+    case frozen       // 在边界冻结中，未执行
+}
+```
+
+#### 6. HapticEvent（手势配置 — 阶段6）
+```swift
+/// 单个震动事件配置
+struct HapticEvent: Codable, Equatable {
+    var enabled: Bool        // 是否启用
+    var waveform: Int32      // 波形 ID（1~16）
+    var count: Int           // 发几次（默认 1）
+    var intervalUs: Int32    // 多次之间的间隔（微秒，默认 50000 = 50ms）
+
+    static let enter    = HapticEvent(enabled: true,  waveform: 2, count: 1, intervalUs: 0)
+    static let tick     = HapticEvent(enabled: true,  waveform: 4, count: 1, intervalUs: 0)
+    static let boundary = HapticEvent(enabled: true,  waveform: 2, count: 2, intervalUs: 50000)
+    static let exit     = HapticEvent(enabled: false, waveform: 4, count: 1, intervalUs: 0)
+}
+```
+
+### 配置模型变更
+
+#### GestureConfig（新增 5 个字段，废弃 4 个 haptic 字段）
+```swift
+public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
+    // --- 现有（不变）---
+    public let id: UUID
+    public var name: String
+    public var regionID: UUID
+    public var eventID: UUID
+    // 第一次轻点
+    public var tapMaxDuration: Double
+    public var tapMaxDrift: Float
+    // 两次轻点衔接
+    public var tapMaxGap: Double
+    // 第二次轻点保持
+    public var holdMinDuration: Double
+    // 鼠标
+    public var disassociateMouse: Bool
+
+    // --- 新增：信号处理管线 ---
+    public var signalSource: SignalSource        // 默认 .normY
+    public var transformMode: TransformMode      // 默认 .delta
+    public var triggerMode: TriggerMode          // 默认 .discrete
+    public var stepNorm: Float                   // 原 slideStepNorm 改名（默认 0.02）
+    public var sensitivity: Float                // 连续模式灵敏度（默认 1.0，范围 0.1~10.0）
+
+    // --- 新增：结构化震动配置（替代原 4 个散落字段）---
+    public var hapticEnter: HapticEvent
+    public var hapticTick: HapticEvent
+    public var hapticBoundary: HapticEvent
+    public var hapticExit: HapticEvent
+
+    // --- 废弃（迁移到 HapticEvent）---
+    // public var hapticEnter: Int32       → hapticEnter.waveform
+    // public var hapticTick: Int32        → hapticTick.waveform
+    // public var hapticBoundary: Int32    → hapticBoundary.waveform
+    // public var boundaryHapticInterval   → hapticBoundary.intervalUs
+}
+```
+
+#### EventConfig（新增 consume 方法，废弃 perform/postBoundaryKey）
+```swift
+public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
+    // --- 现有（不变）---
+    public let id: UUID
+    public var name: String
+    public var actionType: ActionType
+    public var step: Float
+    public var boundaryThreshold: Float
+    public var directionRule: DirectionRule    // 语义改为 positiveIncrease/positiveDecrease
+    public var executionMethod: ExecutionMethod
+
+    // --- 新增：消费管线输出 ---
+    /// 消费手势输出，返回边界结果
+    /// 方向映射在此方法内部完成
+    public func consume(output: GestureOutput) -> BoundaryResult {
+        // 1. 方向映射
+        // 2. 边界预检（frozen 判定）
+        // 3. 执行调节（mediaKey / direct）
+        // 4. 边界后检（hitBoundary 判定 + HUD 唤起）
+        // 5. 返回 BoundaryResult
+    }
+
+    // --- 废弃 ---
+    // public func perform(direction: Int)       → 被 consume 替代
+    // public func postBoundaryKey()             → 合并进 consume
+    // public func mapSlidingDirection(dy:)      → 合并进 consume（阶段3在引擎做）
+}
+```
+
+#### DirectionRule 语义更新
+```swift
+// 旧（Y轴专用）：
+//   .upIncrease  → 上滑(norm_y减小)=增加
+//   .upDecrease  → 上滑=减少
+// 新（信号源无关）：
+//   .positiveIncrease → 信号增大=值增加（默认）
+//   .positiveDecrease → 信号增大=值减少（取反）
+// 对于 normY：信号增大=下滑，所以 positiveIncrease 等价于旧的 upIncrease
+```
+
+### 引擎 holding 分支重写
+
+```swift
+case .holding(let pathIdx, let startRaw, let lastTriggerVal, let ticks, let frozen, let startValue):
+    if !fingerStillThere(pathIdx) {
+        // 退出 holding → 触发 hapticExit（如果 enabled）
+        triggerHaptic(gesture.hapticExit)
+        associateMouse()
+        state = .idle
+    } else if frozen {
+        // frozen 状态：检查是否反向滑动解冻
+        let raw = gesture.signalSource.extract(from: f)
+        let delta = raw - lastTriggerVal
+        let unfreezeDir = startValue <= boundaryThreshold ? +1 : -1  // 朝边界内的方向
+        if event.shouldUnfreeze(delta: delta, direction: unfreezeDir) {
+            state = .holding(..., frozen: false, ...)
+        }
+    } else if let f = edgeFinger, f.pathIndex == pathIdx {
+        // 1. 提取信号
+        let raw = gesture.signalSource.extract(from: f)
+        // 2. 变换
+        let delta = gesture.transformMode == .delta
+            ? raw - lastTriggerVal
+            : raw
+        // 3. 量化 → GestureOutput
+        guard let output = quantize(delta: delta, gesture: gesture) else { break }
+        // 4. 事件消费
+        let result = event.consume(output: output)
+        // 5. 触觉反馈（基于 result）
+        switch result {
+        case .normal:      triggerHaptic(gesture.hapticTick)
+        case .hitBoundary: triggerHaptic(gesture.hapticBoundary)
+        case .frozen:      break
+        }
+        // 6. 更状态
+        let newLastTrigger = computeNewLastTrigger(...)
+        state = .holding(pathIdx, startRaw, newLastTrigger, ticks+1,
+                         frozen: result == .hitBoundary || result == .frozen,
+                         startValue: startValue)
+    }
+```
+
+### 震动执行改为非阻塞
+```swift
+// 旧：usleep(50ms) 阻塞整个引擎
+// 新：用 DispatchQueue 异步发多次震动
+private func triggerHaptic(_ h: HapticEvent) {
+    guard h.enabled, deviceID != 0 else { return }
+    if h.count <= 1 {
+        mt_actuate(deviceID, h.waveform)
+    } else {
+        DispatchQueue.global(qos: .userInitiated).async {
+            for i in 0..<h.count {
+                mt_actuate(self.deviceID, h.waveform)
+                if i < h.count - 1 {
+                    usleep(UInt32(h.intervalUs))
+                }
+            }
+        }
+    }
+}
+```
+
+### Codable 迁移策略
+- 旧 JSON 缺 signalSource/transformMode/triggerMode/sensitivity → 默认值（.normY / .delta / .discrete / 1.0）
+- 旧 JSON 有 hapticEnter(Int32) → 自动转为 HapticEvent(waveform: 旧值, enabled: true)
+- 旧 JSON 有 slideStepNorm → 自动映射到 stepNorm
+- directionRule 值不变（.upIncrease / .upDecrease 字符串保留兼容，内部语义升级）
+
+### UI 变更
+
+#### 手势 tab 新增卡片
+- **「信号处理」卡片**（新增）：
+  - 信号源 Picker（normY/normX/size/pressure）
+  - 变换方式 Picker（delta/absolute）
+  - 量化模式 Segmented（离散/连续）
+  - 步进间距 Slider（离散模式显示，原 slideStepNorm）
+  - 灵敏度 Slider（连续模式显示，0.1~10.0）
+- **「触觉反馈」卡片**（重构）：
+  - 4 行（enter/tick/boundary/exit），每行：
+    - Toggle（启用/禁用）
+    - Stepper（波形 ID 1~16）
+    - Stepper（次数 1~5）
+    - Slider（间隔 0~200ms，次数>1 时显示）
+    - 单项 reset 按钮
+
+#### 事件 tab 调整
+- step 在 mediaKey 模式下显示为「系统档位，不可调」（灰色禁用）
+- directionRule 文案改为「信号增大→值增加 / 信号增大→值减少」
+
+## Timeline 可视化事件图编辑器（2026-08-01 新增概念设计）
+
+### 用户想法提炼
+「以某个状态事件为时间起点（如"进入holding"），在时间轴上直观地挂不同事件/逻辑节点，能够实现不同的反馈（震动/系统值/HUD）和不同的数据处理。」
+
+本质：把当前「硬编码线性状态机 + 6阶段顺序管线」升级为**可配置的 Timeline 事件图**。
+
+---
+
+### 当前配置能到什么程度（v2 线性管线，已规划）
+
+```
+状态机（硬编码顺序：idle→firstTapDown→firstTapUp→secondTapDown→holding→idle）
+  ↓ 某个状态进入时（如 holding）
+  触发 6 阶段线性管线（信号源→变换→量化→输出→消费→震动）
+```
+
+**配置上限**：
+- 可配置：信号源（4种）、变换方式（2种）、量化模式（2种）、方向取反、执行方式（2种）、步长、边界阈值、4个震动时机各自的波形/次数/间隔
+- 不可配置：状态机顺序、每个状态能触发什么分支、"A 且 B 才触发 C"这种条件组合、多反馈并行（边调音量边改鼠标加速）
+
+---
+
+### Timeline 概念（v3，目标：把状态机+管线都配置化）
+
+#### 1. 核心抽象
+
+**Timeline = 起点（TriggerEvent）+ 时间偏移 + 多个 GraphNode 有向图**
+
+```
+TriggerEvent
+  └── t=0ms  ──► [EnterNode: 执行初始化（记录startY/startValue/lockMouse）]
+  └── t=50ms ──► [HapticNode: 波形2 1次]                          ← hapticEnter
+  └── 每帧     ──► [SignalNode: 提取normY]
+                        │
+                        ▼
+                  [TransformNode: delta]
+                        │
+                        ▼
+                  [QuantizeNode: discrete, step=0.02]
+                        │
+                        ├── 有输出 ──► [BranchNode: 非边界？]
+                        │                  │
+                        │                  ├─ 是 ─► [ConsumeNode: +step, direct]
+                        │                  │            │
+                        │                  │            ▼
+                        │                  │       [HapticNode: 波形4 1次]  ← hapticTick
+                        │                  │
+                        │                  └─ 否 ─► [BranchNode: 首次到边界？]
+                        │                               │
+                        │                               ├─ 是 ─► [HapticNode: 波形2 ×2间隔50ms] ← hapticBoundary
+                        │                               │        │
+                        │                               │        ▼
+                        │                               │   [FreezeNode: 冻结直到反向]
+                        │                               │
+                        │                               └─ 否 ─► [DropNode: 丢弃]
+                        │
+                        └── 无输出 ──► [IdleNode: pass]
+```
+
+#### 2. TriggerEvent 类型（时间起点）
+```swift
+enum TriggerEvent: String, Codable, CaseIterable {
+    case onEnterHolding       // 进入 holding（t=0 基准，最常用）
+    case onEnterFirstTapDown  // 第一次轻点按下
+    case onEnterSecondTapDown // 第二次轻点按下
+    case onExitHolding        // 退出 holding（手指抬起）
+    case onCooldown           // 进入冷却（超时/漂移过大）
+    case onTick               // holding 期间每帧（最常用作数据管线起点）
+    case onBoundary           // 刚到达边界时（与 Tick 分支独立）
+}
+```
+
+每个 GestureConfig 可以挂多个 Timeline（如 onEnterHolding + onTick + onExitHolding 三条独立时间线）。
+
+#### 3. GraphNode 类型（可在 Timeline 上拖放的积木块）
+
+按功能分 6 大类：
+
+| 类别 | Node 类型 | 输入 | 输出 | 配置项 |
+|------|-----------|------|------|--------|
+| **数据源** | SignalNode | 无（从当前帧读）| Float | source: normY/normX/size/pressure/velY/velX |
+| | ValueNode | 无 | Float | constant: Float（写死一个数用于测试）|
+| **数学/变换** | TransformNode | Float | Float | mode: delta(fromBaseline)/absolute/derivative(=速度)/integral(=累积位移) |
+| | ScaleNode | Float | Float | multiplier(默认1.0) + offset(默认0) |
+| | ClampNode | Float | Float | min + max |
+| | AbsNode / SignNode | Float | Float | 绝对值 / 取符号(±1) |
+| **量化/门控** | QuantizeNode | Float | Tick(direction,count) or nil | mode: discrete(stepNorm) / continuous(sensitivity) |
+| | GateNode | Float→Bool | Float（pass or drop）| condition: >/>=/</<=/==/!=, threshold: Float |
+| | DebounceNode | any | any | minIntervalMs（防抖）|
+| **条件分支** | BranchNode | 上一步输出 | 两路输出（true/false）| predicate（见下表）|
+| | SwitchNode | Int(索引) | N路输出 | cases: [Node] |
+| **副作用/反馈** | ConsumeNode | Tick 或 Float | BoundaryResult | action(volume/brightness) + method(mediaKey/direct) + step |
+| | HapticNode | 触发信号 | 无 | waveform + count + intervalUs + async(是否不阻塞) |
+| | HUDNode | Float or () | 无 | mode: boundary(发边界媒体键) / custom(发指定键一次) |
+| | MouseNode | () or Float | 无 | mode: lockPosition / accelerate(新系数) / click(type) |
+| | FreezeNode | 触发信号 | 无 | unfreezeCondition: reverseDelta / timeoutMs |
+| | NotifyNode | 任意 | 无 | label: String（回调 onStateChange 通知 UI）|
+| **流控制** | SplitNode | 1入 | 2出（复制）| 并行两个分支（如调音量同时改鼠标加速）|
+| | MergeNode | 2入 | 1出(相加) | mode: sum/max/min（多条分支结果合并）|
+| | BaselineNode | Float | Float | 记录基线（比如 onEnterHolding 时的 norm_y）供后续 delta 用 |
+| | StateNode | Read<Write> | 读写 | key: String（跨节点存储临时变量）|
+
+**BranchNode.predicate（条件表达式语言，简化版）**：
+```swift
+enum Predicate: Codable {
+    case atBoundary           // 当前事件值在边界（读 currentValue）
+    case notAtBoundary
+    case firstTime            // 第一次到这条路径（冻结判定用）
+    case positive             // 上一步输出 > 0
+    case negative
+    case compare(Comparator, Float)  // > threshold 等
+    case and(Predicate, Predicate)
+    case or(Predicate, Predicate)
+    case not(Predicate)
+}
+enum Comparator { case gt, gte, lt, lte, eq, neq }
+```
+
+#### 4. Node 的视觉呈现（UI）
+
+```
+┌─ SignalNode ─────────────────┐
+│ 信号源              [normY ▾] │ ← 下拉选配置
+│ 输出：Float                   │
+└──────────────────────────────┘
+           │  连线 drag & drop
+           ▼
+┌─ QuantizeNode ───────────────┐
+│ 量化模式    [离散刻度  ● 连续] │ ← Segmented
+│ 步长                 0.02  ⚙︎ │ ← 弹出面板
+│ 多档补偿              [on  ✓] │ ← Toggle
+│ 输出：Tick(direction, count)? │
+└──────────────────────────────┘
+          │              │
+     有输出│         无输出│
+          ▼              ▼
+   ┌─ BranchNode ──┐   ┌─ IdleNode ─┐
+   │ 非边界?        │   │ pass       │
+   │ [ 是 ] [ 否 ]  │   └────────────┘
+   └───┬────────┬───┘
+       │        │
+       ▼        ▼
+   Consume  Haptic
+```
+
+- 左侧是 **Node 工具箱面板**（分组显示 Signal/Math/Gate/Feedback 等），拖到画布新增
+- 画布上 Node 之间**拖线连接**（output port → input port，类型不匹配时禁用连线）
+- 每个 Node 右上角有 ⚙︎ 按钮弹出配置面板（复杂的 Predicate 用文本表达式或树状编辑器）
+- 画布底部有 **T=0 时间轴刻度**：
+  - onEnterHolding 触发的节点显示 0ms/50ms/200ms 位置（可左右拖改延迟）
+  - onTick 节点显示 "每帧"（无时间位置，绑定循环）
+  - 同时间点多个节点从上到下显示执行顺序（可上下拖调整顺序）
+
+#### 5. 执行引擎（伪代码）
+
+```swift
+final class TimelineRuntime {
+    // 单个手势的运行时状态：每个 Timeline 一个 GraphEvaluator
+    var evaluators: [TriggerEvent: GraphEvaluator] = [:]
+    // 跨节点共享的临时状态存储
+    var stateStore: [String: AnyCodable] = [:]
+
+    func handle(_ event: TriggerEvent, frame: FrameContext) {
+        guard let eval = evaluators[event] else { return }
+        // 拓扑排序：按依赖顺序执行 Node
+        for node in eval.topologicalOrder {
+            let inputs = eval.readInputs(of: node, from: stateStore)
+            let output = node.execute(inputs: inputs, context: frame, state: &stateStore)
+            eval.writeOutput(node, output, to: &stateStore)
+            // 副作用（Haptic/Consume 等）在这里实际执行
+            if let sideEffect = node as? SideEffectNode {
+                switch sideEffect {
+                case let h as HapticNode:   triggerHaptic(h.config) // async 可选
+                case let c as ConsumeNode:  _ = c.action(output) // return BoundaryResult 写入 state
+                default: break
+                }
+            }
+        }
+    }
+}
+```
+
+关键：**纯计算节点（Signal/Transform/Quantize/Branch）是纯函数，无副作用**，在每帧同步执行且可重复；**副作用节点（Haptic/Consume/Mouse）是 Effect，异步执行且可通过 async flag 决定是否阻塞。**
+
+#### 6. 配置模型
+
+```swift
+// Timeline 配置：单个触发事件对应的节点图
+struct TimelineConfig: Codable, Identifiable {
+    let id: UUID
+    var trigger: TriggerEvent
+    var nodes: [NodeConfig]
+    var edges: [Edge]            // from: nodeID.outputPort, to: nodeID.inputPort
+    var entryNodeIDs: [UUID]     // 起点（无入边的 Node）
+}
+
+struct NodeConfig: Codable, Identifiable {
+    let id: UUID
+    var type: NodeType           // enum，区分上面 6 大类
+    var config: AnyCodable       // 各 Node 自己的参数（SignalConfig/QuantizeConfig/...）
+    var position: CGPoint        // 画布坐标（x=时间轴,y=垂直顺序）
+    var title: String?           // 用户自命名（可选，如"调音量主管线"）
+}
+
+struct Edge: Codable, Hashable {
+    var from: PortID             // nodeID + portName("output"/"true"/"false"...)
+    var to: PortID
+}
+
+// 在 GestureConfig 里挂多条时间线
+public struct GestureConfig: ... {
+    public var timelines: [TimelineConfig]   // 新增，替代现有的信号源/变换/震动零散字段
+    // ... 轻触识别相关参数保留（tapMaxDuration/tapMaxDrift/tapMaxGap/holdMinDuration）
+}
+```
+
+#### 7. 向后兼容：旧配置自动迁移为 Timeline 图
+
+```swift
+// 旧 GestureConfig（v2 signalSource=nromY + transform=delta + quantize=discrete + haptics）
+// → 自动生成 3 条 Timeline：
+
+// Timeline 1: onEnterHolding
+//   BaselineNode(record: "startNormY", signal: normY)
+//   BaselineNode(record: "startValue", source: currentValue(event))
+//   MouseNode(mode: lockPosition)
+//   HapticNode(waveform: 2, count: 1)  ← hapticEnter
+//   Branch(predicate: atBoundary) → HUDNode(mode: boundary)    ← postBoundaryKey
+
+// Timeline 2: onTick（每帧）
+//   SignalNode(normY)
+//     → TransformNode(mode: delta, baseline: "startNormY" 或 lastTrigger 状态)
+//     → QuantizeNode(mode: discrete, step: stepNorm, compensate: true)
+//     → GateNode(hasOutput)
+//       → Branch(predicate: notAtBoundary, usingStart: "startValue")
+//         ├ true: ConsumeNode(action, method, step) → HapticNode(tick)
+//         └ false: Branch(firstTimeAtBoundary)
+//                  ├ true: HapticNode(waveform:2, count:2, interval:50ms) + FreezeNode(unfreeze: reverse)
+//                  └ false: Drop
+//
+// Timeline 3: onExitHolding
+//   MouseNode(mode: unlockPosition)
+//   HapticNode(exit.enabled ? waveform4 : disabled)
+```
+
+用户打开旧配置 → 看到等价的 Timeline 图，可以把它当作"模板"，在此基础上改。
+
+---
+
+### 当前 v2 线性管线 vs v3 Timeline 能力对照
+
+| 能力 | v2 线性管线（已规划）| v3 Timeline 图 |
+|------|-------------------------|----------------|
+| 信号源可选 | normY/normX/size/pressure | 同左，且可多 SignalNode 并行（如 normY + velY 融合）|
+| 数学变换 | delta/absolute 二选一 | 可级联任意个（Scale + Clamp + Derivative 自由组合）|
+| 量化模式 | discrete/continuous 二选一 | 同左，且可加 Debounce、加 Gate 做复杂门控 |
+| 条件分支 | 硬编码 2 层 if（边界/首次）| BranchNode/SwitchNode 任意深度嵌套，表达式语言可编程 |
+| 反馈类型 | haptic + consume + HUD | haptic + consume + HUD + mouse + notify + 自定义 |
+| 反馈并行 | 只有 tick+consume 串行 | SplitNode 可分两路并行（调音量的同时改鼠标加速）|
+| 跨帧状态 | startY/lastTickY/frozen 写死在状态机 | StateNode key-value 任意存储 |
+| 多个触发时机 | 只有 holding 内部 | 6 种 TriggerEvent 各自独立时间线 |
+| 冻结/解冻 | 单一规则（反向解冻）| FreezeNode 条件可自定义（反向/超时/二者同时）|
+| UI 直观性 | 卡片 + Slider | 画布拖拽 + 连线 + 高亮执行路径（执行到哪哪个节点闪烁）|
+| 代码安全 | 线性逻辑简单易审计 | 纯计算纯函数+副作用隔离，执行顺序拓扑排序，支持 dry-run 测试 |
+
+---
+
+### 分阶段实现路线图
+
+节点画布 UI 技术选型：**路线 C（Graphaello 第三方库）**，放弃纯 SwiftUI Canvas 自绘。
+理由：Graphaello 是 SwiftUI 原生语法，开箱即用连线/端口/命中/缩放，半天集成节省 3-5 天手写 Canvas 成本。
+
+| 阶段 | 目标 | 交付物 | 工作量 |
+|------|------|--------|--------|
+| **M1：v2 线性管线落地** | 先把 MEMO 6 阶段线性管线写完 | Pipeline.swift + Config 迁移 + 引擎重写 + 卡片 UI | 中等（1-2天）|
+| **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）|
+| **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）|
+| **M4-C：Graphaello 画布 UI** | Package.swift 加 Graphaello 依赖 → 工具箱面板 → 节点 Port 映射 → 画布拖放连线 → Inspector 弹层 | Views/TimelineCanvas/ + SPM 依赖更新 | 中等（1-2天）|
+| **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 |
+| **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 |
+
+---
+
+### 改动清单（按依赖顺序，先做 M1 线性管线）
+1. 新建 `Sources/GestureEngine/Models/Pipeline.swift`：SignalSource, TransformMode, TriggerMode, GestureOutput, BoundaryResult, HapticEvent
+2. 改 `GestureConfig.swift`：新增 5 字段 + 4 个 HapticEvent，Codable 迁移
+3. 改 `EventConfig.swift`：新增 consume(output:)，废弃 perform/postBoundaryKey/mapSlidingDirection，DirectionRule 语义升级
+4. 改 `GestureEngine.swift`：holding 分支重写 + triggerHaptic 非阻塞 + frozen 解冻
+5. 改 `SystemControl.swift`：删除死代码 adjustVolume/adjustBrightness
+6. 改 `GestureTabView.swift`：新增信号处理卡片 + 重构触觉反馈卡片
+7. 改 `EventTabView.swift`：step 条件禁用 + directionRule 文案更新
+8. 测试：Pipeline 模型测试 + consume 各种 output×method 组合 + Codable 迁移 + frozen 解冻
+
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
 - 状态机从 leftState/rightState 改为 `[UUID: GestureState]` 字典，每帧遍历所有手势
@@ -7,7 +628,75 @@
 - config.json v1→v2 自动迁移，行为一致
 - 模型文件在 `Sources/GestureEngine/Models/`，UI 组件在 `Sources/TouchpadGestures/Views/`
 - 单元测试在 `Tests/GestureEngineTests/`（13 个测试）
-- Release v1.1.0: https://github.com/Zekilou/mac_touchpad/releases/tag/v1.1.0
+- **2026-08-01 v1.1.0 release 已撤销**：代码未经验证不直接发布，执行了 `gh release delete v1.1.0 --yes --cleanup-tag`
+- **下一步**：用户本地编译测试通过后，再重新打 tag + 发 release
+
+### 导航架构完全重写（2026-08-01）
+- **旧架构（已废弃）**：手动 NSWindow + NSHostingView 包 ConfigView → NavigationSplitView，不是 Scene 根视图
+- **新架构**：严格按照官方文档——NavigationSplitView 作为 Settings scene 的根视图
+  - `Settings { ConfigView().environmentObject(appDelegate) }`
+  - 系统自动管理窗口样式、sidebar 透明模糊、窗口居中
+  - `openSettings()` 用 `NSApp.sendAction(Selector(("showSettingsWindow:")))`
+  - Reset All 按钮改用 `.toolbar { ToolbarItem(placement: .primaryAction) }`
+  - 删除 settingsWindow 变量、NSTitlebarAccessoryViewController、NSHostingView、ResetAllTitlebarButton
+- **二级 tab**：官方 `Tab(value:content:label:)` API，ForEach 动态生成
+  - selection 绑定 UUID?，init 时设为首项，不生成随机值
+  - 删除后 `.onChange(of: count)` 验证有效性
+
+### ActionType 扩展（2026-08-01）
+- 原 ActionType 过于简略（仅 volumeUp/volumeDown/brightnessUp/brightnessDown），需扩展为多字段组合
+- **新增 EventConfig 字段**：
+  1. `invertDirection: Bool` — 映射方向取反开关（上滑→减、下滑→加）
+  2. `executionMethod: ExecutionMethod` — 执行方式枚举
+     - `mediaKey`：模拟系统媒体键（带 HUD 反馈，递增/递减）
+     - `direct`：直接调用 API（精确值控制，无 HUD，支持 step 精确累加）
+  3. `actionTarget: ActionTarget` — 行为目标枚举（替代原 ActionType 的 4 项合一）
+     - `systemVolume`：系统音量
+     - `systemBrightness`：系统亮度
+     - 预留：后续可扩展为 mouseScroll / keyPress / customShortcut 等
+  4. `directionRule: DirectionRule` — 方向映射规则
+     - `upIncrease`：上滑=增加，下滑=减少（默认）
+     - `upDecrease`：上滑=减少，下滑=增加（取反）
+     - 注：方向规则= invertDirection ? upDecrease : upIncrease，二选一存储即可
+- **SystemControl 扩展**：
+  - 现有 `volumeUp()/volumeDown()/brightnessUp()/brightnessDown()` = mediaKey 模式（NX_SYSDEFINED 事件）
+  - 新增 `setVolume(_ value: Float)` / `setBrightness(_ value: Float)` = direct 模式（CoreAudio / IOKit 精确赋值）
+  - 新增 `adjustVolume(by step: Float, method: ExecutionMethod)` / `adjustBrightness(by:method:)` 统一入口
+- **UI 扩展（EventTabView）**：
+  - 行为目标选择器（Picker：音量/亮度/预留项）
+  - 方向映射 Toggle（"上滑增加" / "上滑减少" 或 Segmented Control）
+  - 执行方式 Segmented（系统媒体键 HUD / 直接 API 精确值）
+  - 步长 Slider（两种模式都用 step，但 direct 模式支持更细粒度）
+  - 所有新增项带单项 reset 按钮
+- **配置迁移**：旧 JSON 缺字段时
+  - actionType volumeUp/brightnessUp → actionTarget=.systemVolume/.systemBrightness, directionRule=.upIncrease
+  - actionType volumeDown/brightnessDown → actionTarget=.systemVolume/.systemBrightness, directionRule=.upDecrease
+  - executionMethod 默认 `.mediaKey`（保持旧行为一致）
+  - invertDirection 根据旧 actionType 推导（down 类型= true）
+- **引擎逻辑**：GestureEngine 中 holding → adjust 分支
+  - 根据 `event.executionMethod` 走 mediaKey 或 direct 分支
+  - 根据 `event.directionRule` 把 dy 正负映射到 +step/-step
+  - 边界检测统一用 `getVolume()/getBrightness()` 当前实际值判断
+
+## 用户问题记录（2026-07-31）
+### Q1: 一级 Tab 支不支持运行时增删？
+- 一级 Tab 当前实现：SwiftUI 原生 TabView，4 个 tab **硬编码**在 ConfigView 里，**不支持运行时增删**
+- SettingsTabView 是「软件设置」，和业务数据无关，一般不需要动态增删
+- 如果要做运行时增删，需要把一级 Tab 也改成和二级 EditableTabBar 类似的数据驱动模式（但要区分「业务可配置 tab」和「固定功能 tab」）
+
+### Q2: 二级 Tab 能不能也用一级 Tab 的样式（SwiftUI 原生 TabView 那种分段控制风格）？
+- **最终方案（2026-07-31）**：一级和二级 Tab 提到同一行，互斥展开/折叠
+  1. 同一行 HStack：左 = 一级 Tab，右 = 二级 Tab，再右 = 编辑菜单按钮
+  2. 默认：一级展开（显示所有 4 个 tab），二级折叠（只显示当前项 + "⋯" 指示器）
+  3. 点击折叠侧 → 展开它，另一侧折叠
+  4. 折叠样式：TabView 只显示一个 tab + "⋯" 指示器告诉用户还有更多项
+  5. 两者都用 TabView（液态玻璃效果），frame(height: 28) 只显示 tab 条
+  6. 编辑菜单（≡ 编辑 Capsule）：新增/重命名/删除，重命名用 alert 弹窗
+  7. 设置 tab 无二级 tab，隐藏二级 tab 条和编辑菜单
+  8. 新增文件：`CollapsibleTabBar.swift` + `ConfigView.swift`（从 App.swift 提取）
+  9. 子视图改为纯内容区：移除 tab 头，接受 selectedXxxID 为 @Binding
+  10. add/delete/rename 逻辑移至 ConfigView
+  11. ManagedTabHeader.swift 和 EditableTabBar.swift 保留未删除
 
 ## 项目目标
 通过 Apple 私有 **MultitouchSupport.framework** 读取内置触控板的多点触摸结构化数据（96 字节/手指），识别「双击边缘 + 保持 + 垂直滑动」手势，最终做成菜单栏工具（SwiftUI）。
