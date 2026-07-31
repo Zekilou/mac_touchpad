@@ -1,0 +1,26 @@
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj
+*.xcworkspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Build artifacts
+build/
+DerivedData/
+*.app
+*.dmg
+*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# 项目运行时配置（用户本地状态，不入库）
+# config.json / appsettings.json / default.json 由运行时生成在 ~/Library/Application Support/TouchpadGestures/
