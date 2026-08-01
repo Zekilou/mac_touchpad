@@ -3,7 +3,7 @@
 > 一个 macOS 菜单栏 App，通过自定义触控板手势调节系统音量与亮度。
 > 双击触控板边缘 + 保持 + 上下滑动，即可精确调节，带刻度震动反馈。
 
-![platform](https://img.shields.io/badge/platform-macOS%2012%2B-blue)
+![platform](https://img.shields.io/badge/platform-macOS%2015%2B-blue)
 ![language](https://img.shields.io/badge/language-Swift%205.9-orange)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -29,7 +29,7 @@
 
 ## 系统要求
 
-- macOS 12 (Monterey) 或更高
+- macOS 15 (Sequoia) 或更高
 - MacBook 内置触控板（MultitouchSupport.framework 兼容机型）
 - 需授予「输入监控」权限
 
