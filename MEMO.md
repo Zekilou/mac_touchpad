@@ -603,7 +603,7 @@ public struct GestureConfig: ... {
 | 阶段 | 目标 | 交付物 | 工作量 | 状态 |
 |------|------|--------|--------|------|
 | **M1：v2 线性管线落地** | 先把 MEMO 6 阶段线性管线写完 | Pipeline.swift + Config 迁移 + 引擎重写 + 卡片 UI | 中等（1-2天）| **✓ 已完成**（2026-08-01，swift build + 22 tests 通过）|
-| **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）| 待办 |
+| **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）| **✓ 已完成**（2026-08-01，52 tests 通过）|
 | **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）| 待办 |
 | **M4-C：Graphaello 画布 UI** | Package.swift 加 Graphaello 依赖 → 工具箱面板 → 节点 Port 映射 → 画布拖放连线 → Inspector 弹层 | Views/TimelineCanvas/ + SPM 依赖更新 | 中等（1-2天）| 待办 |
 | **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 | 待办 |
@@ -622,6 +622,13 @@ public struct GestureConfig: ... {
 8. 改 `HapticWaveformReference.swift`：用途列动态读取 HapticEvent.waveform 匹配
 9. 测试：swift build 通过；EventConfigTests consume 各种 output×method 组合 + ConfigMigrationTests slideStepNorm→stepNorm + RegionConfigTests，共 22 tests 全通过
 10. 修复：ConfigMigrationTests 中 slideStepNorm 引用改为 stepNorm
+
+### M2 交付清单（已完成，2026-08-01）
+1. 新建 `Sources/GestureEngine/Models/Timeline.swift`：TriggerEvent（onFirstTap/onSecondTap/onEnterHolding/onTick/onBoundaryHit/onExitHolding）、NodeType（6 大类 21 种，`switch` 关键字反引号转义）、PortID、NodeParams（27 参数扁平 Optional 结构，替代 AnyCodable）、NodeConfig/TimelineConfig/Edge、Predicate（indirect 递归 + 手动 Codable：kind 字符串 + comparator/threshold/left/right/value 关联值）
+2. 新建 `Sources/GestureEngine/TimelineMigrator.swift`：v2 GestureConfig → 3 条 Timeline（onEnterHolding 基线记录+锁鼠标+进入震动 / onTick 信号→变换→量化→分支(边界?)→消费+震动+冻结 / onExitHolding 解锁鼠标+退出震动），所有开关跟随配置（disassociateMouse/hapticXxx.enabled）
+3. 新建 `Sources/GestureEngine/TimelineGraphValidator.swift`：Kahn 拓扑排序 dry-run 验证（.valid(order)/.cycle/.danglingEdge/.noEntry）+ reachableNodes 可达性
+4. 测试：TimelineTests（模型 Codable round-trip 11 个）+ TimelineMigratorTests（迁移器 9 个）+ TimelineGraphValidatorTests（拓扑验证 9 个）= 30 个新测试，总 52 tests 全通过
+5. 教训：测试中 `Predicate` 与 Foundation.Predicate(macOS 14+) 同名冲突，用 `import enum GestureEngine.Predicate` 显式导入消除；`GestureEngine.Predicate` 模块限定名不可用（GestureEngine 是类名优先解析）
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
