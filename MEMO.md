@@ -630,8 +630,22 @@ public struct GestureConfig: ... {
 - config.json v1→v2 自动迁移，行为一致
 - 模型文件在 `Sources/GestureEngine/Models/`，UI 组件在 `Sources/TouchpadGestures/Views/`
 - 单元测试在 `Tests/GestureEngineTests/`（13 个测试）
-- **2026-08-01 v1.1.0 release 已撤销**：代码未经验证不直接发布，执行了 `gh release delete v1.1.0 --yes --cleanup-tag`
-- **下一步**：用户本地编译测试通过后，再重新打 tag + 发 release
+- **2026-08-01 v1.1.0 release 已重新发布**：基于 `2c9366d` 提交，包含辅助功能权限检查修复
+  - tag v1.1.0 打在 `2c9366d` 上
+  - release 附带 `TouchpadGestures.zip`（release 构建 + ad-hoc 签名）
+  - 修复：媒体键模式需要辅助功能权限（Accessibility），App 启动时用 `AXIsProcessTrusted()` 检查并弹窗引导
+  - 修复：README 和 build_app.sh macOS 最低版本从 12.0 更正为 15.0
+
+### 媒体键权限问题（2026-08-01）
+- **问题**：mediaKey 模式下音量和亮度都不生效，direct 模式下音量生效
+- **原因**：`CGEvent.post(tap: .cghidEventTap)` 发送系统媒体键事件需要**辅助功能权限**（Accessibility），不是输入监控权限（Input Monitoring）
+  - Input Monitoring：允许读取输入设备数据（触控板触摸帧）
+  - Accessibility：允许发送/控制 UI 事件（模拟媒体键、CGEvent post）
+  - direct 模式用 CoreAudio/IOKit API 不需要 Accessibility
+- **修复**：App 启动时调用 `AXIsProcessTrusted()` 检查，未授权时弹 NSAlert 引导用户去 系统设置 → 隐私与安全性 → 辅助功能
+  - 点击「打开系统设置」调用 `AXIsProcessTrustedWithOptions` 触发系统弹窗将 App 加入辅助功能列表
+  - 需 `import ApplicationServices`
+- **注意**：macOS Sequoia 上每次更新 App 后辅助功能权限会失效，需删除后重新添加
 
 ### 导航架构完全重写（2026-08-01）
 - **旧架构（已废弃）**：手动 NSWindow + NSHostingView 包 ConfigView → NavigationSplitView，不是 Scene 根视图
