@@ -27,10 +27,10 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(v3.regions.count, 2)
         XCTAssertEqual(v3.gestures.count, 2)
         XCTAssertEqual(v3.events.count, 2)
-        // 每个手势都迁移出了单张图，含 4 个 Trigger 入口
+        // 每个手势都迁移出了单张图，含 4 个管道出口入口
         for gesture in v3.gestures {
             let triggers = gesture.timeline.nodes
-                .filter { $0.type == .trigger }
+                .filter { $0.type == .pipeOut }
                 .compactMap { $0.params.trigger }
             XCTAssertEqual(Set(triggers),
                            Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
@@ -84,7 +84,7 @@ final class ConfigMigrationTests: XCTestCase {
         let v3 = ConfigStore.migrate(v1: v1)
 
         let rightGesture = v3.gestures.first { $0.name == "右侧" }!
-        let recognize = rightGesture.timeline.firstNode(of: .recognize)
+        let recognize = rightGesture.timeline.firstNode(of: .recognizer)
         XCTAssertEqual(recognize?.params.tapMaxDuration, 0.2)
         XCTAssertEqual(recognize?.params.tapMaxGap, 0.3)
         XCTAssertEqual(recognize?.params.holdMinDuration, 0.2)
@@ -122,13 +122,13 @@ final class ConfigMigrationTests: XCTestCase {
 
     /// 旧 v3 文件（顶层有绑定、图上无 ref 节点）→ ensureBindingsInGraph 补入图并清空顶层
     func testEnsureBindingsInGraph_BackfillsLegacyTopLevel() throws {
-        // 构造旧 v3 手势：顶层绑定 + 图上仅 recognize
+        // 构造旧 v3 手势：顶层绑定 + 图上仅 recognizer
         let regionID = UUID()
         let eventID = UUID()
         var gesture = GestureConfig(name: "旧", regionID: regionID, eventID: eventID,
                                     timeline: TimelineConfig(
                                         trigger: .onFirstTap,
-                                        nodes: [NodeConfig(type: .recognize,
+                                        nodes: [NodeConfig(type: .recognizer,
                                                            params: NodeParams(tapMaxDuration: 0.2))],
                                         entryNodeIDs: [])
                                     )
@@ -163,7 +163,7 @@ final class ConfigMigrationTests: XCTestCase {
         // v3 旧格式：4 条独立 timeline（最小结构）
         let v3Timelines = [
             TimelineConfig(trigger: .onFirstTap,
-                           nodes: [NodeConfig(type: .recognize,
+                           nodes: [NodeConfig(type: .recognizer,
                                               params: NodeParams(tapMaxDuration: 0.2))],
                            entryNodeIDs: []),
             TimelineConfig(trigger: .onEnterHolding,
@@ -171,8 +171,7 @@ final class ConfigMigrationTests: XCTestCase {
                                               params: NodeParams(key: "startRaw"))],
                            entryNodeIDs: []),
             TimelineConfig(trigger: .onTick,
-                           nodes: [NodeConfig(type: .signal,
-                                              params: NodeParams(source: .normY))],
+                           nodes: [NodeConfig(type: .touchData)],
                            entryNodeIDs: []),
             TimelineConfig(trigger: .onExitHolding,
                            nodes: [NodeConfig(type: .mouse,
@@ -184,13 +183,72 @@ final class ConfigMigrationTests: XCTestCase {
                               timelines: v3Timelines)
         let legacyData = try JSONEncoder().encode(legacy)
         let decoded = try JSONDecoder().decode(GestureConfig.self, from: legacyData)
-        // 合并为单图：4 个 Trigger 入口 + 拓扑有效
-        let triggers = decoded.timeline.nodes.filter { $0.type == .trigger }
+        // 合并为单图：4 个管道出口入口 + 拓扑有效
+        let triggers = decoded.timeline.nodes.filter { $0.type == .pipeOut }
         XCTAssertEqual(Set(triggers.compactMap { $0.params.trigger }),
                        Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
         switch TimelineGraphValidator.topologicalOrder(of: decoded.timeline) {
         case .valid: break
         case let result: XCTFail("合并图拓扑失败: \(result)")
         }
+    }
+
+    // MARK: - signal → touchData 兼容（P2）
+
+    /// 旧 JSON 里 "type":"signal"（单选信号源）解码映射为 touchData（唯一多输出数据源）
+    func testLegacySignalTypeDecodesToTouchData() throws {
+        let json = """
+        {"type":"signal","params":{"source":"normY"},"x":0,"y":0,"id":"00000000-0000-0000-0000-000000000001"}
+        """
+        let node = try JSONDecoder().decode(NodeConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(node.type, .touchData)
+    }
+
+    /// normalize：旧 signal 节点的输出连线 "value" → source 对应字段端口（normY），并清掉单选 source 参数
+    func testNormalizeLegacySignalEdgePort() throws {
+        let json = """
+        {"id":"00000000-0000-0000-0000-000000000010","name":"g",
+         "timeline":{"id":"00000000-0000-0000-0000-000000000011","trigger":"onTick",
+          "nodes":[
+            {"id":"00000000-0000-0000-0000-0000000000A1","type":"trigger","params":{"trigger":"onTick"},"x":0,"y":0},
+            {"id":"00000000-0000-0000-0000-0000000000A2","type":"signal","params":{"source":"normY"},"x":0,"y":0},
+            {"id":"00000000-0000-0000-0000-0000000000A3","type":"transform","params":{},"x":150,"y":0},
+            {"id":"00000000-0000-0000-0000-0000000000A4","type":"quantize","params":{},"x":300,"y":0}
+          ],
+          "edges":[
+            {"from":{"nodeID":"00000000-0000-0000-0000-0000000000A1","portName":"output"},
+             "to":{"nodeID":"00000000-0000-0000-0000-0000000000A2","portName":"input"}},
+            {"from":{"nodeID":"00000000-0000-0000-0000-0000000000A2","portName":"value"},
+             "to":{"nodeID":"00000000-0000-0000-0000-0000000000A3","portName":"input"}},
+            {"from":{"nodeID":"00000000-0000-0000-0000-0000000000A3","portName":"output"},
+             "to":{"nodeID":"00000000-0000-0000-0000-0000000000A4","portName":"input"}}
+          ],
+          "entryNodeIDs":["00000000-0000-0000-0000-0000000000A1"]}}
+        """
+        let config = try JSONDecoder().decode(GestureConfig.self, from: Data(json.utf8))
+        let touchData = config.timeline.firstNode(of: .touchData)
+        let transformID = UUID(uuidString: "00000000-0000-0000-0000-0000000000A3")!
+        let quantizeID = UUID(uuidString: "00000000-0000-0000-0000-0000000000A4")!
+        XCTAssertNotNil(touchData)
+        // 单选 source 参数已清理（touchData 是多输出）
+        XCTAssertNil(touchData?.params.source)
+        // 下游连线端口 "value" → "normY"
+        XCTAssertTrue(config.timeline.edges.contains {
+            $0.from == PortID(nodeID: touchData!.id, portName: "normY")
+                && $0.to == PortID(nodeID: transformID, portName: "value")
+        })
+        // 旧端口名迁移：trigger.output→touchData（注入）、transform.output→quantize.input
+        let triggerID = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+        XCTAssertTrue(config.timeline.edges.contains {
+            $0.from == PortID(nodeID: triggerID, portName: "trigger")
+                && $0.to == PortID(nodeID: touchData!.id, portName: "trigger")
+        })
+        XCTAssertTrue(config.timeline.edges.contains {
+            $0.from == PortID(nodeID: transformID, portName: "result")
+                && $0.to == PortID(nodeID: quantizeID, portName: "value")
+        })
+        // 旧的 "value"/"output"/"input" 端口连线已全部替换
+        XCTAssertFalse(config.timeline.edges.contains { $0.from.portName == "value" || $0.from.portName == "output" })
+        XCTAssertFalse(config.timeline.edges.contains { $0.to.portName == "input" })
     }
 }

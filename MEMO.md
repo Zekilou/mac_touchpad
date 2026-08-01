@@ -683,6 +683,60 @@ public struct GestureConfig: ... {
 6. 测试：TimelineMigratorTests 重写为单图断言（4 trigger/入口连线/参数透传/开关跟随）；TimelineRuntimeTests 构造改单图；ConfigMigrationTests 改单图断言 + v3 数组合并测试；95 tests 通过
 7. 教训：GraphEvaluator 入口可达集必须 reduce/formUnion（不能 map 成数组）；Trigger 节点必须输出 unit（否则"有入边无数据→跳过"导致整链冻结）
 
+### v5 交互修复（2026-08-02 进行中，95 tests 通过）
+用户反馈「画布大小不要有限制 + 节点太散跨度太大」后的画布体验修复：
+1. **画布无限 + 初始 1:1 居中**：`TimelineCanvasView` 初始不再 fit 缩放整图（会缩到节点看不清），改为 zoom=1 + 内容包围盒中心对准视口（`tryCenterIfNeeded`/`centerContent`，onAppear + onChange(geo.size) 双保险）
+2. **fitToContent 去 0.5 下限**：CanvasView 与 GraphView 两处副本统一为 `min(w/h, 1.0)` 无下限，可缩很小看全貌
+3. **迁移布局收紧**：TimelineMigrator 块间距 dy 0/400/800/1200 → 0/260/520/780，Trigger x -240→-200；tick 块横向 x 间隔 200→150（0/150/300/450/600/750），分支 y ±80→±60；GestureConfig.mergeTimelines yOffsets 同步 0/260/520/780（旧 v3 配置合并后布局一致）
+4. 测试不依赖节点坐标（95 tests 无回归）
+
+### v5 交互修复二（2026-08-02，95 tests 通过）
+用户反馈「框外的曲线不渲染 + 不要属性编辑器，编辑 UI 放节点卡片内」：
+1. **框外曲线不渲染根因**：SwiftUI `Canvas` 会裁剪绘制到自身 bounds，而连线 Canvas 只有窗口大小 → 节点（.position 定位不受裁剪）平移后可见，但窗口外连线被 Canvas 剪掉。修复：`contentBounds` 计算全部节点包围盒，Canvas 尺寸 = 包围盒 + 40 padding，`.offset` 对齐内容原点 + `context.translateBy` 画布坐标绘制
+2. **属性编辑器移入节点卡片**：NodePaletteView 移除 NodeParamsEditorView/边列表区块（只留缩放+工具箱）；TimelineNodeView 选中时卡片向下展开（`TimelineCanvasMetrics.nodeHeight(paramRows:edgeRows:expanded:)` 动态高度），内部渲染 NodeParamsEditorView + 入/出边删除；端口钉在头部 56pt 带内 → 展开不移动端口、连线不跳动；`.position` y 用展开高度保持卡片顶对齐 node.y
+3. **编辑器此前其实是只读的**：`nonNilRows` 返回 `(String, String)` 字符串化值，control() 的 switch 永远落到 default 只读分支 → 新增 `NodeParams.typedRows`（Mirror 解包 Optional 保留原始类型），控件恢复真实可编辑；布局改垂直（label 上、控件下）适配 170pt 窄卡片
+4. 教训：Canvas 内容若可能超出视图 bounds（平移浏览的大图），Canvas 尺寸必须覆盖内容区域，不能依赖"子视图不被裁剪"的假设；ForEach 内大表达式导致类型检查超时 → 提取为 `nodeView(_:) -> some View`（AnyView 包装）
+5. 工具：删除 palette 的 selectedNode/nodeEdgeList/edgeRow（移到卡片内）
+
+## v6 数据流节点系统（Blender 风格，2026-08-02 起）
+用户确认的架构：连线 = 类型化 socket（形状=类型，同形状才能连）；触控板数据是**唯一数据源节点**（多变量输出）；valid = "有没有数据"（存在性，非合法性）；branch = 路由器（cond 选路，数据+有效性路由到 out1/out2，未选中路 invalid）；副作用节点输入 unit（事件脉冲，valid 时才执行）。
+- SocketType：float(圆●)/int(方■)/bool(菱◆)/output(三角▲)/unit(空心○)/generic(星☆)
+- SocketValue(value, valid)；传播规则：任一必需输入 invalid → 输出全 invalid
+- 5 阶段计划：P1 类型+端口注册表 → P2 touchData 数据源+删 signal → P3 引擎数据流化 → P4 UI 端口形状 → P5 收尾
+
+### P1 完成（2026-08-02，110 tests 通过后含 P2）
+- 新增 `Models/SocketType.swift`：SocketType + SocketDef(name/type/required) + NodeTypeDef 端口注册表（每 NodeType 固定输入/输出 socket 列表）+ canConnect（generic 匹配任意）
+- NodeValue.swift 新增 SocketValue(valid, value) + 便捷工厂（unit()/invalid()/float()/bool()/output()）
+- 关键端口设计：branch = 路由器(cond:bool + value:generic → out1/out2:generic)；consume(data:output → result:unit)；haptic/mouse/freeze/notify(trigger:unit → result:unit)；数学类(value:float → result:float)；quantize(value:float → tick:output)；gate(value:float → pass:bool)；merge(input1/input2:float → result:float)；split(value:generic → out1/out2)；state(value:generic)
+- 新增 SocketTypeTests（13 个）
+
+### P2 完成（2026-08-02，110 tests）
+- NodeType `.signal` → `.touchData`（唯一数据源，无输入）；自定义 Codable decode 旧 "signal" → touchData
+- SignalSource 加 velX/velY（mt_touch_t.vel_x/vel_y）+ displayName
+- touchData 输出 6 端口：normX/normY/size/pressure/velX/velY（float，端口名 = SignalSource.rawValue）
+- 迁移器：signal 节点 → touchData 节点，连线 touchData.<source> → transform（不再有"输出"端口）
+- GestureConfig：tickSignalSource 改为从 touchData→transform 连线端口推断；decode 后 normalizeLegacyNodes（旧 signal 节点连线 "value"→source 字段端口 + 清 source 参数）
+- 测试更新（signal→touchData）+ 新增 2 个（旧 "signal" decode 映射、normalize 连线修正）
+
+### P3 完成（2026-08-02，115 tests）
+- **NodeExecutors 数据流化**：输入/输出全部改 SocketValue；端口名与注册表统一（value/result/tick/pass/out1/out2/data/trigger/input1/input2）；**必需输入 invalid → 输出全 invalid**（`invalidOutputs` 按注册表输出端口写 .invalid()）；副作用节点（consume/haptic/hud/mouse/freeze/notify）仅在输入有效时执行，执行后输出 result=unit 事件脉冲
+- **branch 路由器化**：输入 cond(bool) + value(generic) → out1/out2 数据路由（cond=true 走 out1，out2 invalid；false 反之）；**cond 优先读输入端口，无连线时回退 predicate**（兼容迁移图）
+- **GraphEvaluator**：portValues 改 [UUID: [String: SocketValue]]（invalid 保留显式传播）；删除 branchResults 激活检查 + "有入边无数据→跳过" 两个旧机制；trigger 输出 unit 脉冲
+- gate 语义变更为输出 pass(bool)（不再是"阻塞链"）；quantize 无刻度 → tick invalid（整链冻结）；baseline 需要 trigger 有效 + frame 读 source
+- 迁移器端口统一：trigger→entry 注入端口 "trigger"；transform 输入 value/输出 result；branch out1/out2；consume data；副作用 trigger
+- 测试：NodeExecutorsTests/GraphEvaluatorTests/TimelineMigratorTests 全部重写适配新语义（SocketValue、路由器、valid 传播、副作用门控）；SocketValue 加 floatValue/boolValue/outputValue 透传属性
+- 下一步 P4：UI 端口形状化（多 socket 显示 + 同形状才能连）
+
+### P4-P6 完成（2026-08-02，108 tests）
+- **P4 UI 端口形状化**：SocketShape（float 圆●/int 方■/bool 菱◆/output 三角▲/unit 空心○/generic 星☆）+ TimelineNodeView 按注册表渲染多端口
+- **P5 收尾**：删旧 trigger/signal/recognize 节点；NodeType decode 兼容旧字符串（"trigger"→pipeOut、"signal"→touchData、"recognize"→recognizer）
+- **P6 识别器节点化**：状态机从 GestureEngine 搬入 recognizer 节点（NodeExecutors.runRecognizer，跨帧 id 私有状态）；引擎删状态机，每帧喂 FrameContext（touches/region/sizeRange/freezeRequested）执行整图；recognizer 输出 4 时机脉冲（firstTap/enterHolding/tick/exitHolding）→ pipeOut 透传 → 各链
+- 迁移器：1 recognizer 根 + 4 pipeOut + 各块；recognizer.<pulse> → pipeOut.trigger；pipeOut.trigger → 块入口（touchData 可选 trigger 门控：非 holding 时 tick 链冻结）
+- GestureEngine：holdingCount/currentHoldingGestureName（UI 显示）+ eventBox 事件引用 + requestFreeze（freeze 节点→下帧注入识别器）；鼠标锁定 warp 保留
+- 删除死代码：TimelineRuntime.swift/GestureState.swift/TimelineRuntimeTests.swift（引擎直接用 GraphEvaluator）
+- touchData 加可选 trigger 输入（pipeOut 门控）；pipeOut 加 trigger 输入（透传）
+- **用户决定：多层画布/子图（系统算法内部也用节点配置、可点进去改）先搁置**，NodeConfig.subgraph 字段已预留，后续需要再做
+
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
 - 状态机从 leftState/rightState 改为 `[UUID: GestureState]` 字典，每帧遍历所有手势

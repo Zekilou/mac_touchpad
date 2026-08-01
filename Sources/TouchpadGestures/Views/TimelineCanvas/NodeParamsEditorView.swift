@@ -3,7 +3,8 @@ import SwiftUI
 import enum GestureEngine.Comparator
 import GestureEngine
 
-/// 可编辑节点参数面板：按字段类型生成控件（数值/开关/文本/枚举/绑定 UUID），写入用 NodeParams.setting
+/// 节点卡片内联参数编辑器：按字段类型生成控件（数值/开关/文本/枚举/绑定 UUID），写入用 NodeParams.setting
+/// 布局：每个参数一行（label 在上、控件在下），适配 170pt 窄卡片
 /// Predicate 等复合类型暂只读展示
 struct NodeParamsEditorView: View {
     @Binding var params: NodeParams
@@ -12,7 +13,7 @@ struct NodeParamsEditorView: View {
     let events: [EventConfig]
     let regions: [RegionConfig]
 
-    /// 波形手感描述（ID, 中文, 英文）——替代原波形对照卡片，直接显示在参数行
+    /// 波形手感描述（ID, 中文, 英文）——直接显示在参数行
     private let waveformCatalog: [(Int32, String, String)] = [
         (1,  "弱 click",               "Weak click"),
         (2,  "强 click (Force Touch)", "Strong click (Force Touch)"),
@@ -29,28 +30,21 @@ struct NodeParamsEditorView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            let rows = params.nonNilRows
+        VStack(alignment: .leading, spacing: 5) {
+            let rows = params.typedRows
             if rows.isEmpty {
                 Text(L10n.tr("（无参数）", "(no params)"))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(.secondary)
             } else {
                 ForEach(rows, id: \.0) { key, value in
-                    paramRow(key: key, value: value)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(key)
+                            .font(.system(size: 9)).monospaced()
+                            .foregroundStyle(.tertiary)
+                        control(key: key, value: value)
+                    }
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private func paramRow(key: String, value: Any) -> some View {
-        HStack(spacing: 6) {
-            Text(key)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .frame(width: 100, alignment: .leading)
-            Spacer(minLength: 4)
-            control(key: key, value: value)
         }
     }
 

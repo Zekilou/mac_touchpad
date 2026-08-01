@@ -1,185 +1,386 @@
 import Foundation
+import mt_bridge
 
-// MARK: - 节点执行器（纯函数：输入 → 输出，副作用经 effects 派发）
+// MARK: - 节点执行器（数据流：输入 socket 值 → 输出 socket 值，副作用经 effects 派发）
 
-/// 按 NodeType 分发执行逻辑。
-/// 约定：输入端口默认 "input"（merge 用 "input1"/"input2"），输出端口 "output"
-///       （split 用 "output1"/"output2"）；branch 不写端口值，只返回 branchResult。
+/// 按 NodeType 分发执行逻辑（v6 数据流语义）。
+/// - 端口名与 NodeTypeDef 注册表一致（如数学类 value→result、quantize value→tick）
+/// - **valid 传播**：任一必需输入 invalid → 输出全 .invalid()（显式，下游可见）
+/// - 副作用节点（consume/haptic/...）仅在输入有效时执行，执行后输出 result = unit（事件脉冲）
+/// - branch = 路由器：cond 决定把 value 路由到 out1/out2，未选中路输出 invalid
 public enum NodeExecutors {
 
     /// 执行单个节点
     /// - Parameters:
     ///   - node: 节点配置（type + params）
-    ///   - inputs: 入边收集到的值，key = to.portName
+    ///   - inputs: 入边收集到的端口值（key = to.portName；含 invalid，表示上游已显式传播）
     ///   - frame: 当前帧上下文
     ///   - state: 跨节点共享状态（baseline/transform.last/debounce.last/state 节点读写）
     ///   - effects: 副作用派发
-    /// - Returns: 执行结果（nil outputs = 无输出，后续节点不激活）
     public static func execute(node: NodeConfig,
-                               inputs: [String: NodeValue],
+                               inputs: [String: SocketValue],
                                frame: FrameContext,
                                state: inout StateStore,
                                effects: TimelineEffects) -> NodeExecutionResult {
         let p = node.params
 
         switch node.type {
+        // MARK: 管道出口（收到有效 unit 脉冲 → 透传启动下游链）
+
+        case .pipeOut:
+            guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
+            return output(node, .unit())
+
+        // MARK: 识别器（系统算法封装：轻点/双击/保持时序识别，内部跨帧状态机）
+
+        case .recognizer:
+            return runRecognizer(node, frame: frame, state: &state, effects: effects)
+
         // MARK: 数据源
-        case .signal:
-            return result(.float(frame.rawSignals[p.source ?? .normY] ?? 0))
+
+        /// 唯一数据源：触控板多变量输出（端口名 = SignalSource.rawValue）
+        /// 可选 trigger 门控：连了 trigger 且无效（非 holding）→ 输出全 invalid（tick 链冻结）
+        case .touchData:
+            if let trig = inputs["trigger"] {
+                guard trig.valid else { return invalidOutputs(node) }
+            }
+            var outputs: [String: SocketValue] = [:]
+            for s in SignalSource.allCases {
+                outputs[s.rawValue] = .float(frame.rawSignals[s] ?? 0)
+            }
+            return NodeExecutionResult(outputs: outputs)
         case .value:
-            return result(.float(p.constant ?? 0))
-        // 触发识别：纯参数承载（引擎状态机读取），无执行逻辑
-        case .recognize:
-            return .init()
+            return output(node, .float(p.constant ?? 0))
 
         // 绑定引用：纯参数承载（无执行逻辑）
         case .region, .event:
             return .init()
 
-        // 触发入口：输出 unit 激活下游链（不参与本身执行）
-        case .trigger:
-            return unit()
         // 批注组：纯结构节点（无执行逻辑）
         case .group:
             return .init()
 
-        // MARK: 数学/变换
+        // MARK: 数学/变换（value:float → result:float）
+
         case .transform:
-            guard let v = inputs["input"]?.floatValue else { return .init() }
+            guard let v = required(inputs, "value")?.value.floatValue else { return invalidOutputs(node) }
             switch p.transform ?? .delta {
             case .delta:
                 let key = "transform.last.\(node.id)"
                 let last = state[key]?.floatValue ?? v
                 state[key] = .float(v)
-                return result(.float(v - last))
+                return output(node, .float(v - last))
             case .absolute:
-                return result(.float(v - (state["startRaw"]?.floatValue ?? 0)))
+                return output(node, .float(v - (state["startRaw"]?.floatValue ?? 0)))
             }
         case .scale:
-            guard let v = inputs["input"]?.floatValue else { return .init() }
-            return result(.float(v * (p.multiplier ?? 1) + (p.offset ?? 0)))
+            guard let v = required(inputs, "value")?.value.floatValue else { return invalidOutputs(node) }
+            return output(node, .float(v * (p.multiplier ?? 1) + (p.offset ?? 0)))
         case .clamp:
-            guard let v = inputs["input"]?.floatValue else { return .init() }
-            return result(.float(min(max(v, p.min ?? 0), p.max ?? 1)))
+            guard let v = required(inputs, "value")?.value.floatValue else { return invalidOutputs(node) }
+            return output(node, .float(min(max(v, p.min ?? 0), p.max ?? 1)))
         case .abs:
-            guard let v = inputs["input"]?.floatValue else { return .init() }
-            return result(.float(abs(v)))
+            guard let v = required(inputs, "value")?.value.floatValue else { return invalidOutputs(node) }
+            return output(node, .float(abs(v)))
         case .sign:
-            guard let v = inputs["input"]?.floatValue else { return .init() }
-            return result(.float(v >= 0 ? 1 : -1))
+            guard let v = required(inputs, "value")?.value.floatValue else { return invalidOutputs(node) }
+            return output(node, .float(v >= 0 ? 1 : -1))
 
         // MARK: 量化/门控
+
         case .quantize:
-            guard let delta = inputs["input"]?.floatValue else { return .init() }
+            guard let v = required(inputs, "value")?.value.floatValue else { return invalidOutputs(node) }
             let mode = p.triggerMode ?? .discrete
-            guard let out = quantize(delta: delta,
+            guard let out = quantize(delta: v,
                                      triggerMode: mode,
                                      stepNorm: p.stepNorm ?? 0.02,
                                      sensitivity: p.sensitivity ?? 1.0,
                                      mapDirection: { frame.directionRule.mapSignalDirection($0) }) else {
-                return .init()
+                // 没到刻度 → 无产出 → tick invalid（整链冻结）
+                return invalidOutputs(node)
             }
-            return result(.output(out))
+            return output(node, .output(out))
         case .gate:
-            guard let v = inputs["input"]?.floatValue else { return .init() }
+            guard let v = required(inputs, "value")?.value.floatValue else { return invalidOutputs(node) }
             let pass = compare(v, p.comparator ?? .gte, p.threshold ?? 0)
-            return pass ? result(.float(v)) : .init()
+            return output(node, .bool(pass))
         case .debounce:
-            guard let v = inputs["input"], (p.minIntervalMs ?? 0) > 0 else {
-                return inputs["input"].map { result($0) } ?? .init()
-            }
+            guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
             let key = "debounce.last.\(node.id)"
             let last = state[key]?.floatValue ?? -.infinity
             let nowF = Float(frame.now)
-            guard nowF - last >= Float(p.minIntervalMs ?? 0) / 1000 else { return .init() }
+            guard nowF - last >= Float(p.minIntervalMs ?? 0) / 1000 else { return invalidOutputs(node) }
             state[key] = .float(nowF)
-            return result(v)
+            return output(node, .unit())
 
-        // MARK: 条件分支
+        // MARK: 条件分支：路由器（cond 选路，value 路由到 out1/out2，未选中路 invalid）
+
         case .branch:
-            guard let predicate = p.predicate else { return .init() }
-            let input = inputs["input"] ?? .unit
-            let value = PredicateEvaluator.evaluate(predicate,
-                                                    input: input,
-                                                    frame: frame,
-                                                    state: &state,
-                                                    nodeID: node.id)
-            // 输入透传到 true/false 端口（激活由 GraphEvaluator 按 branchResult 决定）
-            return NodeExecutionResult(outputs: ["true": input, "false": input],
-                                       branchResult: value)
+            guard let valueV = required(inputs, "value") else { return invalidOutputs(node) }
+            // cond 优先读输入端口；无输入连线时回退 predicate（兼容迁移图）
+            let cond: Bool
+            if let c = inputs["cond"], c.valid {
+                cond = c.value.boolValue ?? false
+            } else if let predicate = p.predicate {
+                cond = PredicateEvaluator.evaluate(predicate, input: valueV.value,
+                                                   frame: frame, state: &state, nodeID: node.id)
+            } else {
+                cond = false
+            }
+            if cond {
+                return NodeExecutionResult(outputs: ["out1": valueV, "out2": .invalid()])
+            } else {
+                return NodeExecutionResult(outputs: ["out1": .invalid(), "out2": valueV])
+            }
         case .`switch`:
-            // 简化：把 input 的 float 值取整作为索引写入 caseN 端口（未连接的 case 跳过）
-            guard let v = inputs["input"]?.floatValue else { return .init() }
-            let index = Int(v)
-            var outputs: [String: NodeValue] = [:]
-            for i in 0..<8 where i == index { outputs["case\(i)"] = .float(v) }
-            return NodeExecutionResult(outputs: outputs.isEmpty ? nil : outputs)
+            // 简化：透传 value → result（多路选择后续完善）
+            guard let v = required(inputs, "value") else { return invalidOutputs(node) }
+            return output(node, v)
 
-        // MARK: 副作用/反馈（执行后写 .unit 输出，支持后续节点串联激活）
+        // MARK: 副作用/反馈（输入有效才执行；执行后输出 result = unit 事件脉冲）
+
         case .consume:
-            guard let out = inputs["input"]?.outputValue else { return .init() }
+            guard let v = required(inputs, "data"), let out = v.value.outputValue else { return invalidOutputs(node) }
             _ = effects.consume(out)
-            return unit()
+            return output(node, .unit())
         case .haptic:
+            guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
             effects.triggerHaptic(waveform: p.waveform ?? 0,
                                   count: p.count ?? 1,
                                   intervalUs: p.intervalUs ?? 0,
                                   async: p.async ?? true)
-            return unit()
+            return output(node, .unit())
         case .hud:
+            guard required(inputs, "data") != nil else { return invalidOutputs(node) }
             effects.showHUD(direction: (p.step ?? 0) >= 0 ? 1 : -1)
-            return unit()
+            return output(node, .unit())
         case .mouse:
+            guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
             switch p.mouseMode ?? .lockPosition {
             case .lockPosition:   effects.lockMouse()
             case .unlockPosition: effects.unlockMouse()
             }
-            return unit()
+            return output(node, .unit())
         case .freeze:
+            guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
             effects.freeze()
-            return unit()
+            return output(node, .unit())
         case .notify:
+            guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
             effects.notify(label: p.label ?? "")
-            return unit()
+            return output(node, .unit())
 
         // MARK: 流控制
+
         case .split:
-            guard let v = inputs["input"] else { return .init() }
-            return NodeExecutionResult(outputs: ["output1": v, "output2": v])
+            guard let v = required(inputs, "value") else { return invalidOutputs(node) }
+            return NodeExecutionResult(outputs: ["out1": v, "out2": v])
         case .merge:
-            guard let a = inputs["input1"]?.floatValue, let b = inputs["input2"]?.floatValue else { return .init() }
+            guard let a = required(inputs, "input1")?.value.floatValue,
+                  let b = required(inputs, "input2")?.value.floatValue else { return invalidOutputs(node) }
             switch p.mergeMode ?? .sum {
-            case .sum: return result(.float(a + b))
-            case .max: return result(.float(max(a, b)))
-            case .min: return result(.float(min(a, b)))
+            case .sum: return output(node, .float(a + b))
+            case .max: return output(node, .float(max(a, b)))
+            case .min: return output(node, .float(min(a, b)))
             }
         case .baseline:
-            // 无输入时从 frame 读信号源（如 enter timeline 的 baseline 节点）
-            let v = inputs["input"]?.floatValue
-                ?? (p.source.map { frame.rawSignals[$0] })
-                ?? nil
-            guard let v else { return .init() }
+            // 触发有效时记录当前帧信号源（trigger:unit 输入；记录到 state[key]）
+            guard inputs["trigger"]?.valid == true else { return invalidOutputs(node) }
+            let src = p.source ?? .normY
+            guard let v = frame.rawSignals[src] else { return invalidOutputs(node) }
             state[p.key ?? "baseline"] = .float(v)
-            return result(.float(v))
+            return output(node, .float(v))
         case .state:
             let key = p.key ?? "state"
-            if let v = inputs["input"] {
-                state[key] = v
-                return result(v)
+            if let v = inputs["value"], v.valid {
+                state[key] = v.value
+                return output(node, v)
             }
-            return result(state[key] ?? .unit)
+            // 读：有值 → 有效；无值 → invalid
+            return output(node, state[key].map { SocketValue(valid: true, value: $0) } ?? .invalid())
         }
+    }
+
+    // MARK: - 识别器（轻点/双击/保持 时序识别）
+
+    /// 识别器内部跨帧状态（私有变量，按节点 id 存储）
+    struct RecognizerState {
+        enum Phase { case idle, firstTapDown, firstTapUp, secondTapDown, holding, cooldown }
+        var phase: Phase = .idle
+        var pathIndex: Int32 = -1
+        var startTime: Double = 0
+        var startPos: (Float, Float) = (0, 0)
+        var maxDrift: Float = 0
+        var endTime: Double = 0
+        var startRaw: Float = 0
+        var lastTriggerVal: Float = 0
+        var frozen = false
+        var freezeDir: Float = 0
+
+        init(phase: Phase = .idle, pathIndex: Int32 = -1, startTime: Double = 0,
+             startPos: (Float, Float) = (0, 0), maxDrift: Float = 0, endTime: Double = 0,
+             startRaw: Float = 0, lastTriggerVal: Float = 0,
+             frozen: Bool = false, freezeDir: Float = 0) {
+            self.phase = phase
+            self.pathIndex = pathIndex
+            self.startTime = startTime
+            self.startPos = startPos
+            self.maxDrift = maxDrift
+            self.endTime = endTime
+            self.startRaw = startRaw
+            self.lastTriggerVal = lastTriggerVal
+            self.frozen = frozen
+            self.freezeDir = freezeDir
+        }
+    }
+
+    /// 识别器状态（跨帧私有变量；每手势一个识别器节点，id 唯一）
+    private static var recognizerStates: [UUID: RecognizerState] = [:]
+
+    /// 识别器执行：读 FrameContext 原始帧 → 内部状态机 → 输出时机脉冲（unit，切换帧有效）
+    private static func runRecognizer(_ node: NodeConfig, frame: FrameContext,
+                                      state: inout StateStore,
+                                      effects: TimelineEffects) -> NodeExecutionResult {
+        var st = recognizerStates[node.id] ?? RecognizerState()
+        defer { recognizerStates[node.id] = st }
+
+        let p = node.params
+        let sizeRange = frame.sizeRange
+        func isSizeValid(_ t: mt_touch_t) -> Bool { sizeRange.contains(t.size) }
+        func inRegion(_ t: mt_touch_t) -> Bool { frame.region?.contains(x: t.norm_x, y: t.norm_y) ?? true }
+        let edgeFinger: mt_touch_t? = frame.touches.first {
+            inRegion($0) && $0.state != 0 && $0.state != 7 && isSizeValid($0)
+        }
+        func fingerStillThere(_ pathIdx: Int32) -> Bool {
+            frame.touches.contains { $0.pathIndex == pathIdx && $0.state != 0 && $0.state != 7 && isSizeValid($0) }
+        }
+
+        let source = p.source ?? .normY
+        let stepNorm = p.stepNorm ?? 0.02
+        let tapMaxDuration = p.tapMaxDuration ?? 0.20
+        let tapMaxDrift = p.tapMaxDrift ?? 0.05
+        let tapMaxGap = p.tapMaxGap ?? 0.30
+        let holdMinDuration = p.holdMinDuration ?? 0.20
+
+        // 输出端口：默认全 invalid，时机切换帧置有效
+        var out: [String: SocketValue] = [
+            "firstTap": .invalid(), "enterHolding": .invalid(),
+            "tick": .invalid(), "exitHolding": .invalid(),
+        ]
+
+        func drift(_ f: mt_touch_t, _ pos: (Float, Float)) -> Float {
+            hypot(f.norm_x - pos.0, f.norm_y - pos.1)
+        }
+
+        switch st.phase {
+        case .idle:
+            if let f = edgeFinger, f.state == 1 || f.state == 3 || f.state == 4 {
+                st = RecognizerState(phase: .firstTapDown, pathIndex: f.pathIndex,
+                                     startTime: frame.now, startPos: (f.norm_x, f.norm_y))
+            }
+
+        case .firstTapDown:
+            if !fingerStillThere(st.pathIndex) {
+                if st.maxDrift > tapMaxDrift {
+                    st = RecognizerState(phase: .cooldown, pathIndex: st.pathIndex)
+                } else {
+                    st = RecognizerState(phase: .firstTapUp, endTime: frame.now)
+                }
+            } else {
+                if let f = edgeFinger, f.pathIndex == st.pathIndex {
+                    let d = drift(f, st.startPos)
+                    if d > st.maxDrift { st.maxDrift = d }
+                }
+                if frame.now - st.startTime > tapMaxDuration || st.maxDrift > tapMaxDrift {
+                    st = RecognizerState(phase: .cooldown, pathIndex: st.pathIndex)
+                }
+            }
+
+        case .firstTapUp:
+            if frame.now - st.endTime > tapMaxGap {
+                st = RecognizerState(phase: .idle)
+            } else if let f = edgeFinger, f.state == 1 || f.state == 3 || f.state == 4 {
+                out["firstTap"] = .unit()   // 第一次轻点完成
+                st = RecognizerState(phase: .secondTapDown, pathIndex: f.pathIndex,
+                                     startTime: frame.now, startPos: (f.norm_x, f.norm_y))
+            }
+
+        case .secondTapDown:
+            if !fingerStillThere(st.pathIndex) {
+                st = RecognizerState(phase: .idle)
+            } else {
+                if let f = edgeFinger, f.pathIndex == st.pathIndex {
+                    let d = drift(f, st.startPos)
+                    if d > st.maxDrift { st.maxDrift = d }
+                }
+                if st.maxDrift > tapMaxDrift {
+                    st = RecognizerState(phase: .cooldown, pathIndex: st.pathIndex)
+                } else if frame.now - st.startTime > holdMinDuration,
+                          let f = edgeFinger, f.pathIndex == st.pathIndex {
+                    // 进入保持：记录起始信号 + 输出 enterHolding 脉冲
+                    let raw = source.extract(from: f)
+                    st = RecognizerState(phase: .holding, pathIndex: f.pathIndex,
+                                         startTime: frame.now, startPos: (f.norm_x, f.norm_y),
+                                         startRaw: raw, lastTriggerVal: raw)
+                    out["enterHolding"] = .unit()
+                    effects.recognizerState(holding: true)
+                }
+            }
+
+        case .holding:
+            if !fingerStillThere(st.pathIndex) {
+                out["exitHolding"] = .unit()
+                effects.recognizerState(holding: false)
+                st = RecognizerState(phase: .idle)
+            } else if st.frozen {
+                // 冻结中：反向滑动（方向与冻结前移动相反）且幅度足够 → 解冻
+                guard let f = edgeFinger, f.pathIndex == st.pathIndex else { break }
+                let raw = source.extract(from: f)
+                let delta = raw - st.lastTriggerVal
+                if abs(delta) >= 0.5 * stepNorm, (delta >= 0) != (st.freezeDir >= 0) {
+                    st.frozen = false
+                    st.lastTriggerVal = raw
+                }
+            } else if let f = edgeFinger, f.pathIndex == st.pathIndex {
+                let raw = source.extract(from: f)
+                if frame.freezeRequested {
+                    // 冻结请求（freeze 节点已执行）→ 进入冻结
+                    st.frozen = true
+                    st.freezeDir = raw >= st.lastTriggerVal ? 1 : -1
+                } else {
+                    out["tick"] = .unit()   // 保持中每帧脉冲 → 调节链
+                    st.lastTriggerVal = raw
+                }
+            }
+
+        case .cooldown:
+            if !fingerStillThere(st.pathIndex) {
+                st = RecognizerState(phase: .idle)
+            }
+        }
+
+        return NodeExecutionResult(outputs: out)
     }
 
     // MARK: - 辅助
 
-    private static func result(_ v: NodeValue) -> NodeExecutionResult {
-        NodeExecutionResult(outputs: ["output": v])
+    /// 单输出节点：输出端口取注册表第一个输出名（如 result/tick/pass/trigger）
+    private static func output(_ node: NodeConfig, _ v: SocketValue) -> NodeExecutionResult {
+        let name = NodeTypeDef.outputSockets(of: node.type).first?.name ?? "result"
+        return NodeExecutionResult(outputs: [name: v])
     }
 
-    /// 副作用节点标准输出：写 .unit 使后续节点可激活
-    private static func unit() -> NodeExecutionResult {
-        NodeExecutionResult(outputs: ["output": .unit])
+    /// 读取必需输入：缺失或 invalid → nil（调用方输出全 invalid）
+    private static func required(_ inputs: [String: SocketValue], _ port: String) -> SocketValue? {
+        guard let v = inputs[port], v.valid else { return nil }
+        return v
+    }
+
+    /// 必需输入无效 → 所有输出端口写 .invalid()（显式传播；无输出端口的节点返回 nil）
+    private static func invalidOutputs(_ node: NodeConfig) -> NodeExecutionResult {
+        let sockets = NodeTypeDef.outputSockets(of: node.type)
+        guard !sockets.isEmpty else { return .init() }
+        return NodeExecutionResult(outputs: Dictionary(uniqueKeysWithValues: sockets.map { ($0.name, SocketValue.invalid()) }))
     }
 
     private static func compare(_ v: Float, _ cmp: Comparator, _ thr: Float) -> Bool {

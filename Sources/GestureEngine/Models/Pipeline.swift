@@ -14,6 +14,10 @@ public enum SignalSource: String, Codable, CaseIterable {
     case size
     /// Z 轴压力：上限 ~1.54
     case pressure
+    /// X 轴归一化速度
+    case velX
+    /// Y 轴归一化速度
+    case velY
 
     /// 从 mt_touch_t 提取对应字段值
     /// - Parameter t: 原始触摸帧（96 字节 struct，来自 mt_bridge.h）
@@ -23,6 +27,8 @@ public enum SignalSource: String, Codable, CaseIterable {
         case .normX:    return t.norm_x
         case .size:     return t.size
         case .pressure: return t.zPressure
+        case .velX:     return t.vel_x
+        case .velY:     return t.vel_y
         }
     }
 
@@ -33,6 +39,8 @@ public enum SignalSource: String, Codable, CaseIterable {
         case .normX:    return L10n.tr("X 轴坐标", "X Axis")
         case .size:     return L10n.tr("接触面积", "Touch Size")
         case .pressure: return L10n.tr("Z 轴压力", "Z Pressure")
+        case .velX:     return L10n.tr("X 轴速度", "X Velocity")
+        case .velY:     return L10n.tr("Y 轴速度", "Y Velocity")
         }
     }
 }

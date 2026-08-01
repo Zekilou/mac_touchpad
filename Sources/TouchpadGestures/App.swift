@@ -313,7 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 .environmentObject(self))
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 680, height: 820),
-                styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered, defer: false)
             // 标题栏透明融入内容，整个窗口只有左右两栏
             window.titlebarAppearsTransparent = true

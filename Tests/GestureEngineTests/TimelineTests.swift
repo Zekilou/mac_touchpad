@@ -51,7 +51,7 @@ final class TimelineTests: XCTestCase {
     }
 
     func testTimelineConfigEdgeQueries() {
-        let a = NodeConfig(type: .signal, params: NodeParams(source: .normY), x: 0, y: 0)
+        let a = NodeConfig(type: .touchData, params: NodeParams(), x: 0, y: 0)
         let b = NodeConfig(type: .transform, params: NodeParams(transform: .delta), x: 200, y: 0)
         let edge = Edge(from: PortID(nodeID: a.id, portName: "output"),
                         to: PortID(nodeID: b.id, portName: "input"))

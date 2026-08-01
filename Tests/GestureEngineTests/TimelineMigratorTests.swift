@@ -14,16 +14,18 @@ final class TimelineMigratorTests: XCTestCase {
                     step: 0.0125, boundaryThreshold: 0.001)
     }
 
-    // MARK: - 总体结构（单图 + Trigger 入口）
+    // MARK: - 总体结构（单图 + recognizer 根 + 4 个管道出口）
 
-    func testMigrate_ProducesSingleGraphWithFourTriggers() {
+    func testMigrate_ProducesSingleGraphWithFourPipeOuts() {
         let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
-        // 4 个 Trigger 入口节点（不再分 4 条 timeline）
-        let triggers = graph.nodes
-            .filter { $0.type == .trigger }
+        // 4 个管道出口入口节点（每个 TriggerEvent 一个）
+        let pipes = graph.nodes
+            .filter { $0.type == .pipeOut }
             .compactMap { $0.params.trigger }
-        XCTAssertEqual(Set(triggers),
+        XCTAssertEqual(Set(pipes),
                        Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
+        // recognizer 根节点存在
+        XCTAssertNotNil(graph.firstNode(of: .recognizer))
         // 拓扑验证通过
         switch TimelineGraphValidator.topologicalOrder(of: graph) {
         case .valid(let order):
@@ -33,40 +35,45 @@ final class TimelineMigratorTests: XCTestCase {
         }
     }
 
-    func testMigrate_TriggerConnectsToBlockEntries() {
+    func testMigrate_RecognizerPulseConnectsToPipeOuts() {
         let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
-        // onTick 的 Trigger → signal（tick 链入口）
-        let tickTrigger = graph.nodes.first { $0.type == .trigger && $0.params.trigger == .onTick }!
-        let signal = graph.firstNode(of: .signal)!
-        XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: tickTrigger.id, portName: "output")
-                && $0.to == PortID(nodeID: signal.id, portName: "input")
-        })
-        // onFirstTap 的 Trigger → recognize（识别入口）
-        let tapTrigger = graph.nodes.first { $0.type == .trigger && $0.params.trigger == .onFirstTap }!
-        let recognize = graph.firstNode(of: .recognize)!
-        XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: tapTrigger.id, portName: "output")
-                && $0.to == PortID(nodeID: recognize.id, portName: "input")
-        })
+        let recognizer = graph.firstNode(of: .recognizer)!
+        // 每个触发时机：recognizer.<pulse> → pipeOut.trigger
+        let pulses: [(TriggerEvent, String)] = [
+            (.onFirstTap, "firstTap"),
+            (.onEnterHolding, "enterHolding"),
+            (.onTick, "tick"),
+            (.onExitHolding, "exitHolding"),
+        ]
+        for (triggerEvent, pulse) in pulses {
+            let pipe = graph.nodes.first { $0.type == .pipeOut && $0.params.trigger == triggerEvent }!
+            XCTAssertTrue(graph.edges.contains {
+                $0.from == PortID(nodeID: recognizer.id, portName: pulse)
+                    && $0.to == PortID(nodeID: pipe.id, portName: "trigger")
+            }, "缺少 \(triggerEvent) 脉冲连线")
+        }
     }
 
-    // MARK: - onFirstTap（触发识别 + 绑定）
+    // MARK: - recognizer（识别参数在根节点）
 
-    func testRecognizeNode_CarriesTapParams() {
+    func testRecognizerNode_CarriesTapParamsAndSignalSource() {
         var pipeline = makePipeline()
         pipeline.tapMaxDuration = 0.35
         pipeline.tapMaxDrift = 0.08
         pipeline.tapMaxGap = 0.5
         pipeline.holdMinDuration = 0.25
+        pipeline.signalSource = .normX
+        pipeline.stepNorm = 0.03
 
         let graph = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())
-        let recognize = graph.firstNode(of: .recognize)
-        XCTAssertNotNil(recognize)
-        XCTAssertEqual(recognize?.params.tapMaxDuration, 0.35)
-        XCTAssertEqual(recognize?.params.tapMaxDrift, 0.08)
-        XCTAssertEqual(recognize?.params.tapMaxGap, 0.5)
-        XCTAssertEqual(recognize?.params.holdMinDuration, 0.25)
+        let recognizer = graph.firstNode(of: .recognizer)
+        XCTAssertNotNil(recognizer)
+        XCTAssertEqual(recognizer?.params.tapMaxDuration, 0.35)
+        XCTAssertEqual(recognizer?.params.tapMaxDrift, 0.08)
+        XCTAssertEqual(recognizer?.params.tapMaxGap, 0.5)
+        XCTAssertEqual(recognizer?.params.holdMinDuration, 0.25)
+        XCTAssertEqual(recognizer?.params.source, .normX)
+        XCTAssertEqual(recognizer?.params.stepNorm, 0.03)
     }
 
     func testMigrate_WithBindings_GeneratesRefNodes() {
@@ -113,13 +120,13 @@ final class TimelineMigratorTests: XCTestCase {
     func testTickChain_CoreNodesAndEdges() {
         let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
 
-        let signal = graph.firstNode(of: .signal)
+        let touchData = graph.firstNode(of: .touchData)
         let transform = graph.firstNode(of: .transform)
         let quantize = graph.firstNode(of: .quantize)
         let branch = graph.firstNode(of: .branch)
         let consume = graph.firstNode(of: .consume)
         let freeze = graph.firstNode(of: .freeze)
-        XCTAssertNotNil(signal)
+        XCTAssertNotNil(touchData)
         XCTAssertNotNil(transform)
         XCTAssertNotNil(quantize)
         XCTAssertNotNil(branch)
@@ -127,7 +134,6 @@ final class TimelineMigratorTests: XCTestCase {
         XCTAssertNotNil(freeze)
 
         // 参数透传
-        XCTAssertEqual(signal?.params.source, .normY)
         XCTAssertEqual(transform?.params.transform, .delta)
         XCTAssertEqual(quantize?.params.stepNorm, 0.02)
         XCTAssertEqual(quantize?.params.triggerMode, .discrete)
@@ -135,24 +141,32 @@ final class TimelineMigratorTests: XCTestCase {
         XCTAssertEqual(consume?.params.method, .mediaKey)
         XCTAssertEqual(consume?.params.step, 0.0125)
 
-        // 边：signal→transform→quantize→branch；true→consume；false→freeze
+        // 边：pipeOut(onTick).trigger → touchData（门控）→ transform → quantize → branch；out1→consume；out2→freeze
+        let tickPipe = graph.nodes.first { $0.type == .pipeOut && $0.params.trigger == .onTick }!
+        XCTAssertTrue(graph.edges.contains {
+            $0.from == PortID(nodeID: tickPipe.id, portName: "trigger")
+                && $0.to == PortID(nodeID: touchData!.id, portName: "trigger")
+        })
         func connected(_ from: NodeConfig?, _ to: NodeConfig?, port: String) -> Bool {
             guard let from, let to else { return false }
             return graph.edges.contains {
-                $0.from == PortID(nodeID: from.id, portName: "output")
-                    && $0.to == PortID(nodeID: to.id, portName: "input")
+                $0.from == PortID(nodeID: from.id, portName: port)
+                    && $0.to == PortID(nodeID: to.id, portName: "value")
             }
         }
-        XCTAssertTrue(connected(signal, transform, port: "input"))
-        XCTAssertTrue(connected(transform, quantize, port: "input"))
-        XCTAssertTrue(connected(quantize, branch, port: "input"))
         XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: branch!.id, portName: "true")
-                && $0.to == PortID(nodeID: consume!.id, portName: "input")
+            $0.from == PortID(nodeID: touchData!.id, portName: "normY")
+                && $0.to == PortID(nodeID: transform!.id, portName: "value")
+        })
+        XCTAssertTrue(connected(transform, quantize, port: "result"))
+        XCTAssertTrue(connected(quantize, branch, port: "tick"))
+        XCTAssertTrue(graph.edges.contains {
+            $0.from == PortID(nodeID: branch!.id, portName: "out1")
+                && $0.to == PortID(nodeID: consume!.id, portName: "data")
         })
         XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: branch!.id, portName: "false")
-                && $0.to == PortID(nodeID: freeze!.id, portName: "input")
+            $0.from == PortID(nodeID: branch!.id, portName: "out2")
+                && $0.to == PortID(nodeID: freeze!.id, portName: "trigger")
         })
     }
 

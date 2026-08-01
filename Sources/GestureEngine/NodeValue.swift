@@ -1,4 +1,5 @@
 import Foundation
+import mt_bridge
 
 // MARK: - 节点值（节点间传递的数据）
 
@@ -24,6 +25,42 @@ public enum NodeValue: Equatable {
     }
 }
 
+// MARK: - 端口运行时值（数据 + 有效性标记）
+
+/// 端口运行时值：数据 + 有效性标记
+/// valid = 本帧该端口有没有产出数据（存在性，与值本身无关；"合法性"是节点业务逻辑）
+/// 传播规则：节点任一必需输入 invalid → 输出全 invalid；副作用节点仅在输入 valid 时执行
+public struct SocketValue: Equatable {
+    /// 有没有数据（false = 上游未产出，链路断开）
+    public var valid: Bool
+    /// 数据值（unit 类型端口为占位值；invalid 时为 .unit 占位）
+    public var value: NodeValue
+
+    public init(valid: Bool = true, value: NodeValue) {
+        self.valid = valid
+        self.value = value
+    }
+
+    /// 事件脉冲：unit 类型端口的有效输出（"事件发生了"，无数据）
+    public static func unit() -> SocketValue { SocketValue(valid: true, value: .unit) }
+
+    /// 无数据（invalid）：链路断开 / 条件未选中 / 未产出
+    public static func invalid() -> SocketValue { SocketValue(valid: false, value: .unit) }
+
+    /// 便捷：有效浮点值
+    public static func float(_ v: Float) -> SocketValue { SocketValue(valid: true, value: .float(v)) }
+    /// 便捷：有效布尔值
+    public static func bool(_ v: Bool) -> SocketValue { SocketValue(valid: true, value: .bool(v)) }
+    /// 便捷：有效量化输出
+    public static func output(_ v: GestureOutput) -> SocketValue { SocketValue(valid: true, value: .output(v)) }
+
+    // MARK: - 值透传（读 value 内层）
+
+    public var floatValue: Float? { value.floatValue }
+    public var boolValue: Bool? { value.boolValue }
+    public var outputValue: GestureOutput? { value.outputValue }
+}
+
 // MARK: - 跨节点共享状态
 
 /// 节点图执行时的共享状态存储（baseline/transform.last/debounce.last/state 节点共用）
@@ -42,15 +79,31 @@ public struct FrameContext {
     public var directionRule: DirectionRule
     /// 当前事件值是否在边界（branch 的 atBoundary/notAtBoundary 用，由外部注入）
     public var isAtBoundary: Bool
+    /// 原始触摸帧（识别器节点用：轻点/双击/保持时序识别）
+    public var touches: [mt_touch_t]
+    /// 手势绑定区域（识别器判断边缘接触）
+    public var region: RegionConfig?
+    /// 接触面积过滤范围（防手掌误触发）
+    public var sizeRange: ClosedRange<Float>
+    /// 引擎侧冻结请求（freeze 节点置位，识别器读入 frozen 状态）
+    public var freezeRequested: Bool
 
     public init(rawSignals: [SignalSource: Float] = [:],
                 now: Double = 0,
                 directionRule: DirectionRule = .positiveDecrease,
-                isAtBoundary: Bool = false) {
+                isAtBoundary: Bool = false,
+                touches: [mt_touch_t] = [],
+                region: RegionConfig? = nil,
+                sizeRange: ClosedRange<Float> = 0.1...1.0,
+                freezeRequested: Bool = false) {
         self.rawSignals = rawSignals
         self.now = now
         self.directionRule = directionRule
         self.isAtBoundary = isAtBoundary
+        self.touches = touches
+        self.region = region
+        self.sizeRange = sizeRange
+        self.freezeRequested = freezeRequested
     }
 }
 
@@ -73,17 +126,18 @@ public protocol TimelineEffects {
     func freeze()
     /// 通知 UI（NotifyNode）
     func notify(label: String)
+    /// 识别器 holding 状态变化（引擎据此维护鼠标锁定/事件引用）
+    func recognizerState(holding: Bool)
 }
 
 // MARK: - 节点执行结果
 
-/// 单节点执行结果：输出端口值（nil = 无输出/链断开）+ 分支结果（branch 专用）
+/// 单节点执行结果：输出端口值（[端口名: SocketValue]；nil = 该节点无输出端口）
+/// 必需输入无效 → 输出全 .invalid()（显式 valid 传播）；副作用节点仅在输入有效时执行
 public struct NodeExecutionResult {
-    public var outputs: [String: NodeValue]?
-    public var branchResult: Bool?
+    public var outputs: [String: SocketValue]?
 
-    public init(outputs: [String: NodeValue]? = nil, branchResult: Bool? = nil) {
+    public init(outputs: [String: SocketValue]? = nil) {
         self.outputs = outputs
-        self.branchResult = branchResult
     }
 }

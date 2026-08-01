@@ -12,35 +12,73 @@ struct TimelineCanvasView: View {
     @Binding var zoom: CGFloat
     @Binding var pan: CGSize
     @Binding var selectedNodeID: UUID?
+    /// 触控板事件排除区域（window 坐标）：该区域内的滑动/捏合不拦截（放行给左侧栏滚动等）
+    @Binding var excludeRect: CGRect
+    /// 绑定可选项（region/event 节点参数 Picker 数据源）
+    let events: [EventConfig]
+    let regions: [RegionConfig]
 
-    /// 进行中的连线（起点节点 + 当前端点，画布坐标）
-    @State private var connecting: (from: NodeConfig, current: CGPoint)?
+    /// 进行中的连线（起点节点 + 输出端口名 + 当前端点，画布坐标）
+    @State private var connecting: (from: NodeConfig, fromPort: String, current: CGPoint)?
     /// 节点拖拽起点（防 translation 漂移）
     @State private var dragOrigin: (id: UUID, x: Double, y: Double)?
     /// 手势起点快照
     @State private var panOrigin: CGSize?
-    @State private var zoomOrigin: CGFloat?
     @State private var didFit = false
 
     private var groupNodes: [NodeConfig] { timeline.nodes.filter { $0.type == .group } }
     private var regularNodes: [NodeConfig] { timeline.nodes.filter { $0.type != .group } }
 
+    /// 全部节点（含组框）的内容包围盒（画布坐标）；空图返回 nil
+    private var contentBounds: CGRect? {
+        guard !timeline.nodes.isEmpty else { return nil }
+        let w = TimelineCanvasMetrics.nodeWidth
+        let minX = timeline.nodes.map(\.x).min()!
+        let maxX = timeline.nodes.map { node -> Double in
+            node.type == .group ? node.x + (node.params.groupWidth ?? 300) : node.x + Double(w)
+        }.max()!
+        let minY = timeline.nodes.map(\.y).min()!
+        let maxY = timeline.nodes.map { node -> Double in
+            if node.type == .group {
+                return node.y + (node.params.groupHeight ?? 200)
+            }
+            let portRows = max(NodeTypeDef.inputSockets(of: node.type).count,
+                               NodeTypeDef.outputSockets(of: node.type).count)
+            return node.y + Double(TimelineCanvasMetrics.nodeBaseHeight(portRows: portRows))
+        }.max()!
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                // 背景（承载平移/缩放/触控板手势）
+                // 最底层：触控板事件捕获（两指滑动平移 / 捏合缩放），窗口级监听
+                ScrollWheelCatcher(
+                    onScroll: { dx, dy in
+                        // 内容跟随手指：两指上滑内容上移（与系统滚动方向相反）
+                        pan.width += dx
+                        pan.height += dy
+                    },
+                    onMagnify: { m, center in
+                        // 以手势位置为锚点缩放：保持指针下的内容点不动
+                        let oldZoom = zoom
+                        zoom = min(max(zoom * m, 0.3), 3.0)
+                        let scale = zoom / oldZoom
+                        pan = CGSize(
+                            width: center.x - (center.x - pan.width) * scale,
+                            height: center.y - (center.y - pan.height) * scale
+                        )
+                    },
+                    excludeRect: excludeRect
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                // 背景（承载拖拽平移 + 点击取消选中）
                 Rectangle()
                     .fill(Color.primary.opacity(0.03))
                     .contentShape(Rectangle())
                     .gesture(panGesture)
-                    .gesture(magnifyGesture)
                     .onTapGesture { selectedNodeID = nil }
-                    .background(
-                        ScrollWheelCatcher { dx, dy in
-                            pan.width -= dx
-                            pan.height -= dy
-                        }
-                    )
 
                 // 组框层（在节点下方）
                 ForEach(groupNodes) { node in
@@ -51,38 +89,102 @@ struct TimelineCanvasView: View {
                         .gesture(dragGroup(node))
                 }
 
-                // 连线层（固定边 + 进行中虚线）
-                Canvas { context, _ in
-                    for edge in timeline.edges { drawEdge(edge, in: &context) }
-                    if let c = connecting { drawConnectingLine(c, in: &context) }
+                // 连线层（固定边 + 进行中虚线）——画布坐标绘制，由外层 scaleEffect+offset 统一变换
+                // 注意：Canvas 会裁剪绘制到自身 bounds，尺寸必须覆盖整个内容包围盒（否则窗口外连线不渲染）
+                if let bounds = contentBounds {
+                    Canvas { context, _ in
+                        // 内容原点 → 画布本地原点（本地原点对齐内容包围盒左上角）
+                        context.translateBy(x: -(bounds.minX - 20), y: -(bounds.minY - 20))
+                        for edge in timeline.edges { drawEdge(edge, in: &context) }
+                        if let c = connecting { drawConnectingLine(c, in: &context) }
+                    }
+                    .frame(width: bounds.width + 40, height: bounds.height + 40)
+                    .offset(x: bounds.minX - 20, y: bounds.minY - 20)
+                    .allowsHitTesting(false)
                 }
-                .transformEffect(canvasTransform)
-                .allowsHitTesting(false)
 
                 // 节点层
                 ForEach(regularNodes) { node in
-                    TimelineNodeView(
-                        node: node,
-                        isSelected: node.id == selectedNodeID,
-                        onConnectDrag: { n, p in connecting = (n, p) },
-                        onConnectEnd: { n, p in finishConnect(from: n, at: p) }
-                    )
-                    .position(x: node.x + TimelineCanvasMetrics.nodeWidth / 2,
-                              y: node.y + TimelineCanvasMetrics.nodeHeight / 2)
-                    .onTapGesture { selectedNodeID = node.id }
-                    .gesture(dragNode(node))
+                    nodeView(node)
+                        .position(x: node.x + TimelineCanvasMetrics.nodeWidth / 2,
+                                  y: node.y + expandedHeight(node) / 2)
+                        .onTapGesture { selectedNodeID = node.id }
+                        .gesture(dragNode(node))
                 }
             }
             .scaleEffect(zoom, anchor: .topLeading)
             .offset(x: pan.width, y: pan.height)
-            .onAppear {
-                if !didFit { fitToContent(geo.size); didFit = true }
-            }
+            // 首次布局完成（尺寸非零）时居中内容（节点 1:1 显示，画布无限、平移浏览）
+            .onAppear { tryCenterIfNeeded(geo.size) }
+            .onChange(of: geo.size) { tryCenterIfNeeded($0) }
             .onDeleteCommand { deleteSelection() }
         }
     }
 
+    private func tryCenterIfNeeded(_ size: CGSize) {
+        if !didFit, size.width > 0, size.height > 0 {
+            centerContent(size)
+            didFit = true
+        }
+    }
+
+    /// 节点卡片总高度（基础 = 头部+端口行；选中展开 += 内联编辑器行数）
+    private func expandedHeight(_ node: NodeConfig) -> CGFloat {
+        let portRows = max(NodeTypeDef.inputSockets(of: node.type).count,
+                           NodeTypeDef.outputSockets(of: node.type).count)
+        return TimelineCanvasMetrics.nodeHeight(
+            portRows: portRows,
+            paramRows: node.params.typedRows.count,
+            edgeRows: timeline.incomingEdges(to: node.id).count + timeline.outgoingEdges(from: node.id).count,
+            expanded: node.id == selectedNodeID)
+    }
+
+    /// 初始视图：zoom 保持 1:1，内容包围盒中心对准视口中心
+    private func centerContent(_ size: CGSize) {
+        guard !timeline.nodes.isEmpty else { return }
+        zoom = 1
+        let minX = timeline.nodes.map(\.x).min()!
+        let maxX = timeline.nodes.map { node -> Double in
+            node.type == .group ? node.x + (node.params.groupWidth ?? 300) : node.x + Double(TimelineCanvasMetrics.nodeWidth)
+        }.max()!
+        let minY = timeline.nodes.map(\.y).min()!
+        let maxY = timeline.nodes.map { node -> Double in
+            if node.type == .group { return node.y + (node.params.groupHeight ?? 200) }
+            let portRows = max(NodeTypeDef.inputSockets(of: node.type).count,
+                               NodeTypeDef.outputSockets(of: node.type).count)
+            return node.y + Double(TimelineCanvasMetrics.nodeBaseHeight(portRows: portRows))
+        }.max()!
+        pan = CGSize(width: size.width / 2 - (minX + maxX) / 2,
+                     height: size.height / 2 - (minY + maxY) / 2)
+    }
+
     // MARK: - 组框
+
+    /// 单个节点卡片视图（含内联参数编辑；找不到索引时返回空视图）
+    private func nodeView(_ node: NodeConfig) -> some View {
+        guard let idx = timeline.nodes.firstIndex(where: { $0.id == node.id }) else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
+            TimelineNodeView(
+                node: node,
+                isSelected: node.id == selectedNodeID,
+                zoom: zoom,
+                events: events,
+                regions: regions,
+                params: Binding(
+                    get: { timeline.nodes[idx].params },
+                    set: { timeline.nodes[idx].params = $0 }
+                ),
+                edges: timeline.incomingEdges(to: node.id) + timeline.outgoingEdges(from: node.id),
+                onDeleteEdge: { edge in
+                    timeline.edges.removeAll { $0 == edge }
+                },
+                onConnectDrag: { n, port, p in connecting = (n, port, p) },
+                onConnectEnd: { n, port, p in finishConnect(from: n, fromPort: port, at: p) }
+            )
+        )
+    }
 
     private func groupWidth(_ node: NodeConfig) -> CGFloat {
         CGFloat(node.params.groupWidth ?? 300)
@@ -131,7 +233,9 @@ struct TimelineCanvasView: View {
                 for i in timeline.nodes.indices where i != idx {
                     let n = timeline.nodes[i]
                     let cx = n.x + TimelineCanvasMetrics.nodeWidth / 2
-                    let cy = n.y + TimelineCanvasMetrics.nodeHeight / 2
+                    let rows = max(NodeTypeDef.inputSockets(of: n.type).count,
+                                   NodeTypeDef.outputSockets(of: n.type).count)
+                    let cy = n.y + Double(TimelineCanvasMetrics.nodeBaseHeight(portRows: rows)) / 2
                     if cx >= origin.x, cx <= origin.x + Double(w),
                        cy >= origin.y, cy <= origin.y + Double(h) {
                         timeline.nodes[i].x = n.x + dx
@@ -140,13 +244,6 @@ struct TimelineCanvasView: View {
                 }
             }
             .onEnded { _ in dragOrigin = nil }
-    }
-
-    // MARK: - 坐标变换（与 scaleEffect(topLeading)+offset 一致）
-
-    private var canvasTransform: CGAffineTransform {
-        CGAffineTransform(scaleX: zoom, y: zoom)
-            .concatenating(CGAffineTransform(translationX: pan.width, y: pan.height))
     }
 
     // MARK: - 手势
@@ -176,33 +273,31 @@ struct TimelineCanvasView: View {
             .onEnded { _ in panOrigin = nil }
     }
 
-    private var magnifyGesture: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                if zoomOrigin == nil { zoomOrigin = zoom }
-                guard let origin = zoomOrigin else { return }
-                zoom = min(max(origin * value.magnification, 0.3), 3.0)
-            }
-            .onEnded { _ in zoomOrigin = nil }
-    }
-
     // MARK: - 连线
 
-    private func finishConnect(from: NodeConfig, at point: CGPoint) {
+    /// 完成连线：命中目标输入端口且形状匹配才连接
+    private func finishConnect(from: NodeConfig, fromPort: String, at point: CGPoint) {
         defer { connecting = nil }
-        guard let target = hitTestInputPort(at: point), target.id != from.id else { return }
-        let edge = Edge(from: PortID(nodeID: from.id, portName: "output"),
-                        to: PortID(nodeID: target.id, portName: "input"))
+        guard let fromType = NodeTypeDef.outputSockets(of: from.type).first(where: { $0.name == fromPort })?.type else { return }
+        guard let target = hitTestInputPort(at: point, fromType: fromType), target.node.id != from.id else { return }
+        let edge = Edge(from: PortID(nodeID: from.id, portName: fromPort),
+                        to: PortID(nodeID: target.node.id, portName: target.port))
         guard !timeline.edges.contains(edge) else { return }
         timeline.edges.append(edge)
     }
 
-    private func hitTestInputPort(at point: CGPoint) -> NodeConfig? {
+    /// 命中检测：目标节点的输入 socket 位置命中 + 形状匹配（返回节点与端口名）
+    private func hitTestInputPort(at point: CGPoint, fromType: SocketType) -> (node: NodeConfig, port: String)? {
         let r = TimelineCanvasMetrics.portHitRadius
         for node in regularNodes where connecting?.from.id != node.id {
-            let p = node.inputPortPoint
-            if (p.x - point.x) * (p.x - point.x) + (p.y - point.y) * (p.y - point.y) <= r * r {
-                return node
+            let sockets = NodeTypeDef.inputSockets(of: node.type)
+            for (i, socket) in sockets.enumerated() {
+                let p = node.inputPortPoint(index: i)
+                let dx = p.x - point.x
+                let dy = p.y - point.y
+                if dx * dx + dy * dy <= r * r, NodeTypeDef.canConnect(from: fromType, to: socket.type) {
+                    return (node, socket.name)
+                }
             }
         }
         return nil
@@ -211,8 +306,15 @@ struct TimelineCanvasView: View {
     private func drawEdge(_ edge: Edge, in context: inout GraphicsContext) {
         guard let from = node(edge.from.nodeID), let to = node(edge.to.nodeID),
               from.type != .group, to.type != .group else { return }
-        let start = from.outputPortPoint
-        let end = to.inputPortPoint
+        // 输出端口：按 from.portName 找注册表索引；输入端口：按 to.portName 找索引（找不到=入口注入边，画到节点头部）
+        guard let fromIdx = NodeTypeDef.outputSockets(of: from.type).firstIndex(where: { $0.name == edge.from.portName }) else { return }
+        let start = from.outputPortPoint(index: fromIdx)
+        let end: CGPoint
+        if let toIdx = NodeTypeDef.inputSockets(of: to.type).firstIndex(where: { $0.name == edge.to.portName }) {
+            end = to.inputPortPoint(index: toIdx)
+        } else {
+            end = CGPoint(x: to.x, y: to.y + TimelineCanvasMetrics.headerHeight / 2)
+        }
         let dx = max(abs(end.x - start.x), 40) * TimelineCanvasMetrics.curveFactor
         var path = Path()
         path.move(to: start)
@@ -223,10 +325,11 @@ struct TimelineCanvasView: View {
                        style: StrokeStyle(lineWidth: 2, lineCap: .round))
     }
 
-    private func drawConnectingLine(_ c: (from: NodeConfig, current: CGPoint),
+    private func drawConnectingLine(_ c: (from: NodeConfig, fromPort: String, current: CGPoint),
                                     in context: inout GraphicsContext) {
+        guard let idx = NodeTypeDef.outputSockets(of: c.from.type).firstIndex(where: { $0.name == c.fromPort }) else { return }
         var path = Path()
-        path.move(to: c.from.outputPortPoint)
+        path.move(to: c.from.outputPortPoint(index: idx))
         path.addLine(to: c.current)
         context.stroke(path, with: .color(.teal),
                        style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
@@ -234,24 +337,20 @@ struct TimelineCanvasView: View {
 
     // MARK: - 适应画布 / 删除
 
-    /// 初始/手动：缩放平移使全部内容（含组框）可见
+    /// 「适应画布」按钮：缩放平移使全部内容（含组框）可见（无下限，可缩很小看全貌）
     func fitToContent(_ canvasSize: CGSize) {
         guard !timeline.nodes.isEmpty else { zoom = 1; pan = .zero; return }
         let w = TimelineCanvasMetrics.nodeWidth
-        let h = TimelineCanvasMetrics.nodeHeight
-        let minX = timeline.nodes.map { min($0.x, $0.x) }.min()!
+        let minX = timeline.nodes.map(\.x).min()!
         let maxX = timeline.nodes.map { node -> Double in
-            if node.type == .group {
-                return node.x + (node.params.groupWidth ?? 300)
-            }
-            return node.x + Double(w)
+            node.type == .group ? node.x + (node.params.groupWidth ?? 300) : node.x + Double(w)
         }.max()!
         let minY = timeline.nodes.map(\.y).min()!
         let maxY = timeline.nodes.map { node -> Double in
-            if node.type == .group {
-                return node.y + (node.params.groupHeight ?? 200)
-            }
-            return node.y + Double(h)
+            if node.type == .group { return node.y + (node.params.groupHeight ?? 200) }
+            let portRows = max(NodeTypeDef.inputSockets(of: node.type).count,
+                               NodeTypeDef.outputSockets(of: node.type).count)
+            return node.y + Double(TimelineCanvasMetrics.nodeBaseHeight(portRows: portRows))
         }.max()!
         let contentW = maxX - minX + 160
         let contentH = maxY - minY + 160

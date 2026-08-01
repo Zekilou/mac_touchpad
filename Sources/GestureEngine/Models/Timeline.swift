@@ -36,12 +36,12 @@ public enum TriggerEvent: String, Codable, CaseIterable {
 /// 可在 Timeline 上拖放的逻辑节点
 /// @ai: do not remove existing cases
 public enum NodeType: String, Codable, CaseIterable {
-    // 触发入口（引擎按此时机执行其下游链）
-    case trigger
+    // 管道出口：链的执行入口（收到有效 unit 脉冲 → 透传启动下游）
+    case pipeOut
+    // 识别器：系统算法封装（输入原始触摸帧，内部跨帧状态机，输出时机脉冲）
+    case recognizer
     // 数据源
-    case signal, value
-    // 触发识别（状态机参数）
-    case recognize
+    case touchData, value
     // 绑定引用（手势↔区域/事件 关联）
     case region, event
     // 批注组（视觉分组框，不参与执行）
@@ -59,13 +59,13 @@ public enum NodeType: String, Codable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        // 触发入口
-        case .trigger:   return L10n.tr("触发节点", "Trigger")
+        // 管道出口
+        case .pipeOut:     return L10n.tr("管道出口", "Pipe Out")
+        // 识别器
+        case .recognizer:  return L10n.tr("识别器", "Recognizer")
         // 数据源
-        case .signal:    return L10n.tr("信号源", "Signal")
+        case .touchData: return L10n.tr("触控板数据", "Touchpad Data")
         case .value:     return L10n.tr("常量值", "Value")
-        // 触发识别
-        case .recognize: return L10n.tr("触发识别", "Recognize")
         // 绑定引用
         case .region:    return L10n.tr("区域引用", "Region Ref")
         case .event:     return L10n.tr("事件引用", "Event Ref")
@@ -96,6 +96,25 @@ public enum NodeType: String, Codable, CaseIterable {
         case .merge:     return L10n.tr("合并", "Merge")
         case .baseline:  return L10n.tr("基线记录", "Baseline")
         case .state:     return L10n.tr("状态存储", "State")
+        }
+    }
+
+    // MARK: - Codable（旧 "signal"/"trigger"/"recognize" 兼容）
+
+    /// 自定义 decode：旧配置里的 "signal"（单选信号源）→ touchData（多输出数据源）；
+    /// "trigger" → pipeOut（管道出口）；"recognize" → recognizer（识别器）
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if raw == "signal" {
+            self = .touchData
+        } else if raw == "trigger" {
+            self = .pipeOut
+        } else if raw == "recognize" {
+            self = .recognizer
+        } else if let t = NodeType(rawValue: raw) {
+            self = t
+        } else {
+            self = .pipeOut
         }
     }
 }
@@ -322,18 +341,22 @@ public struct NodeConfig: Codable, Identifiable, Hashable {
     public var x: Double
     public var y: Double
     public var title: String?
+    /// 内嵌子图（嵌套画布，P6 预留）：非 nil 时执行器递归运行子图，替代默认实现
+    public var subgraph: TimelineConfig?
 
     public init(id: UUID = UUID(),
                 type: NodeType,
                 params: NodeParams = NodeParams(),
                 x: Double = 0, y: Double = 0,
-                title: String? = nil) {
+                title: String? = nil,
+                subgraph: TimelineConfig? = nil) {
         self.id = id
         self.type = type
         self.params = params
         self.x = x
         self.y = y
         self.title = title
+        self.subgraph = subgraph
     }
 }
 

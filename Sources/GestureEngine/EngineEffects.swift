@@ -6,18 +6,12 @@ final class EventBox {
     init(_ value: EventConfig) { self.value = value }
 }
 
-/// Timeline 副作用 → 手势引擎桥接（TimelineRuntime 的 effects 参数）
+/// Timeline 副作用 → 手势引擎桥接（GraphEvaluator 的 effects 参数）
 /// 把节点的副作用派发到真实系统：震动/调节/鼠标/冻结
 final class EngineEffects: TimelineEffects {
     weak var engine: GestureEngine?
     /// 当前 holding 手势的事件引用（consume 的 mutating 状态跨帧保留）
     var eventBox: EventBox?
-    /// 本帧是否请求冻结（onTick 的 FreezeNode 触发 → 引擎置 holding.frozen）
-    private(set) var freezeRequested = false
-
-    func resetFrame() {
-        freezeRequested = false
-    }
 
     func triggerHaptic(waveform: Int32, count: Int, intervalUs: Int32, async: Bool) {
         engine?.triggerHaptic(waveform: waveform, count: count, intervalUs: intervalUs, async: async)
@@ -36,9 +30,13 @@ final class EngineEffects: TimelineEffects {
     func lockMouse() { engine?.disassociateMouse() }
     func unlockMouse() { engine?.associateMouse() }
 
-    func freeze() { freezeRequested = true }
+    func freeze() { engine?.requestFreeze() }
 
     func notify(label: String) {
         // 预留：UI 通知（M6 调试工具使用）
+    }
+
+    func recognizerState(holding: Bool) {
+        engine?.recognizerState(holding: holding)
     }
 }

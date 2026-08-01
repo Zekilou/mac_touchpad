@@ -4,18 +4,16 @@ import CoreGraphics
 import AppKit
 import mt_bridge
 
-/// 手势引擎：管理多个手势的状态机（v3 节点化）
-/// - 状态机转换参数（轻点识别）从 onFirstTap 图的 RecognizeNode 读取
-/// - holding 内部流程（进入/刻度/退出）由 TimelineRuntime 按图执行
+/// 手势引擎（v6 识别器节点化）：
+/// - 不再运行自己的状态机——识别器节点（图上）内部做轻点/双击/保持识别，输出时机脉冲
+/// - 引擎每帧把原始触摸帧注入 FrameContext，执行整张图，副作用经图上节点派发
+/// - 引擎保留系统能力：鼠标锁定 warp、事件引用（trackedValue 跨帧）、边界判断注入、冻结请求传递
 public final class GestureEngine {
 
     public var config: AppConfig {
         didSet { ConfigStore.save(config) }
     }
     public var deviceID: UInt64 = 0
-
-    /// 每个手势的独立状态机，key = gesture.id
-    private var states: [UUID: GestureState] = [:]
 
     // 鼠标关联状态
     private var mouseDisassociated = false
@@ -24,22 +22,24 @@ public final class GestureEngine {
     // 帧限频
     private var lastProcessTime: Double = 0
 
-    // Timeline 运行时：每个 holding 手势一个（key = gesture.id）
-    private var runtimes: [UUID: TimelineRuntime] = [:]
-    /// 当前 holding 手势的事件引用（consume 的 trackedValue 跨帧保留）
-    private var eventBox: EventBox?
-    /// 副作用桥接
+    // 副作用桥接
     private let effects = EngineEffects()
 
-    // 回调：手势状态变化时通知 UI（手势名, 状态）
-    public var onStateChange: ((String, GestureState) -> Void)?
+    /// 每手势的执行器 + 跨帧状态（key = gesture.id）
+    private var runtimes: [UUID: (evaluator: GraphEvaluator, store: StateStore)] = [:]
+    /// 当前有手势在 holding（识别器报告）
+    private(set) var holdingCount = 0
+    /// 当前 holding 的手势名（UI 显示）
+    public private(set) var currentHoldingGestureName: String?
+    /// 冻结请求（freeze 节点置位 → 下一帧注入识别器）
+    private var freezeRequested = false
+    /// 当前处理手势的事件引用（识别器 holding 进出时创建/写回）
+    private var eventBox: EventBox?
+    private var currentEventIndex: Int?
 
     public init() {
         config = ConfigStore.load()
         effects.engine = self
-        for gesture in config.gestures {
-            states[gesture.id] = .idle
-        }
     }
 
     // MARK: - 每帧处理
@@ -53,181 +53,105 @@ public final class GestureEngine {
             lastProcessTime = now
         }
 
-        for i in 0..<config.gestures.count {
-            let gesture = config.gestures[i]
-            // 绑定从 onFirstTap 图的 RegionRef/EventRef 节点读取（旧文件回退顶层字段）
+        // 上一帧的冻结请求传给识别器（freeze 节点执行 → 下一帧进入 frozen）
+        let pendingFreeze = freezeRequested
+        freezeRequested = false
+        holdingCount = 0
+        currentHoldingGestureName = nil
+
+        let sizeRange = config.global.touchSizeMin...config.global.touchSizeMax
+
+        for gesture in config.gestures {
+            // 绑定从图上 RegionRef/EventRef 节点读取（旧文件回退顶层字段）
             guard let regionID = gesture.boundRegionID,
                   let eventID = gesture.boundEventID,
                   let region = config.regions.first(where: { $0.id == regionID }),
                   let eventIndex = config.events.firstIndex(where: { $0.id == eventID }) else { continue }
-            if states[gesture.id] == nil { states[gesture.id] = .idle }
-            processGesture(gesture, region: region,
-                           event: &config.events[eventIndex],
-                           state: &states[gesture.id]!,
-                           touches: touches, now: now)
+
+            currentEventIndex = eventIndex
+            // 边界状态：holding 中读事件 trackedValue；非 holding 无 eventBox → false
+            let boundary = eventBox?.value.isAtAnyBoundary() ?? false
+
+            var frame = FrameContext(
+                rawSignals: rawSignals(of: touches.first),
+                now: now,
+                directionRule: config.events[eventIndex].directionRule,
+                isAtBoundary: boundary,
+                touches: touches,
+                region: region,
+                sizeRange: sizeRange,
+                freezeRequested: pendingFreeze
+            )
+
+            var rt = runtime(for: gesture)
+            rt.evaluator.evaluate(frame: frame, state: &rt.store, effects: effects, entryIDs: nil)
         }
 
-        // 鼠标锁定：任意手势在 holding 即锁定
-        if mouseDisassociated && isAnyHolding() {
+        // 鼠标锁定：任意手势 holding 即锁定
+        if mouseDisassociated && holdingCount > 0 {
             CGWarpMouseCursorPosition(lockedCursorPos)
-        } else if mouseDisassociated && !isAnyHolding() {
+        } else if mouseDisassociated && holdingCount == 0 {
             CGAssociateMouseAndMouseCursorPosition(1)
             mouseDisassociated = false
         }
     }
 
-    // MARK: - 单手势状态机
+    // MARK: - 识别器 holding 状态桥接（EngineEffects → 引擎）
 
-    private func processGesture(_ gesture: GestureConfig, region: RegionConfig,
-                                event: inout EventConfig,
-                                state: inout GestureState, touches: [mt_touch_t], now: Double) {
-
-        func isSizeValid(_ t: mt_touch_t) -> Bool {
-            t.size >= config.global.touchSizeMin && t.size <= config.global.touchSizeMax
-        }
-
-        let edgeFinger: mt_touch_t? = touches.first { t in
-            region.contains(x: t.norm_x, y: t.norm_y) && t.state != 0 && t.state != 7 && isSizeValid(t)
-        }
-
-        func fingerStillThere(_ pathIdx: Int32) -> Bool {
-            touches.contains { $0.pathIndex == pathIdx && $0.state != 0 && $0.state != 7 && isSizeValid($0) }
-        }
-
-        switch state {
-        case .idle:
-            if let f = edgeFinger, (f.state == 1 || f.state == 3 || f.state == 4) {
-                state = .firstTapDown(pathIndex: f.pathIndex, startTime: now,
-                                      startPos: (f.norm_x, f.norm_y), maxDrift: 0)
-                onStateChange?(gesture.name, state)
+    func recognizerState(holding: Bool) {
+        if holding {
+            holdingCount += 1
+            currentHoldingGestureName = currentGestureName
+            // 建立事件引用（consume 的 trackedValue 跨帧保留）
+            if eventBox == nil, let index = currentEventIndex {
+                var event = config.events[index]
+                event.resetTracking()
+                let box = EventBox(event)
+                eventBox = box
+                effects.eventBox = box
             }
-
-        case .firstTapDown(let pathIdx, let startTime, let startPos, var maxDrift):
-            if !fingerStillThere(pathIdx) {
-                if maxDrift > gesture.tapMaxDrift {
-                    state = .cooldown(pathIndex: pathIdx)
-                } else {
-                    state = .firstTapUp(pathIndex: pathIdx, endTime: now)
-                }
-                onStateChange?(gesture.name, state)
-            } else {
-                if let f = edgeFinger, f.pathIndex == pathIdx {
-                    let dx = f.norm_x - startPos.0
-                    let dy = f.norm_y - startPos.1
-                    let drift = (dx*dx + dy*dy).squareRoot()
-                    if drift > maxDrift { maxDrift = drift }
-                }
-                if now - startTime > gesture.tapMaxDuration || maxDrift > gesture.tapMaxDrift {
-                    state = .cooldown(pathIndex: pathIdx)
-                    onStateChange?(gesture.name, state)
-                }
+        } else {
+            holdingCount = max(0, holdingCount - 1)
+            // 退出：trackedValue 写回配置
+            if let box = eventBox, let index = currentEventIndex {
+                config.events[index] = box.value
             }
-
-        case .firstTapUp(_, let endTime):
-            if now - endTime > gesture.tapMaxGap {
-                state = .idle
-                onStateChange?(gesture.name, state)
-            } else if let f = edgeFinger, (f.state == 1 || f.state == 3 || f.state == 4) {
-                state = .secondTapDown(pathIndex: f.pathIndex, startTime: now,
-                                       startPos: (f.norm_x, f.norm_y), maxDrift: 0)
-                onStateChange?(gesture.name, state)
-            }
-
-        case .secondTapDown(let pathIdx, let startTime, let startPos, var maxDrift):
-            if !fingerStillThere(pathIdx) {
-                state = .idle
-                onStateChange?(gesture.name, state)
-            } else {
-                if let f = edgeFinger, f.pathIndex == pathIdx {
-                    let dx = f.norm_x - startPos.0
-                    let dy = f.norm_y - startPos.1
-                    let drift = (dx*dx + dy*dy).squareRoot()
-                    if drift > maxDrift { maxDrift = drift }
-                }
-                if maxDrift > gesture.tapMaxDrift {
-                    state = .cooldown(pathIndex: pathIdx)
-                    onStateChange?(gesture.name, state)
-                } else if now - startTime > gesture.holdMinDuration,
-                          let f = edgeFinger, f.pathIndex == pathIdx {
-                    // 建立运行时 + 事件引用，执行 onEnterHolding 时间线
-                    let source = gesture.tickSignalSource
-                    let startRaw = source.extract(from: f)
-                    event.resetTracking()
-                    let startVal = event.trackedCurrentValue()
-                    event.postBoundaryKeyOnEnterIfNeeded()
-                    eventBox = EventBox(event)
-                    effects.eventBox = eventBox
-                    effects.resetFrame()
-                    runtime(for: gesture)?.handle(.onEnterHolding,
-                                                 frame: FrameContext(rawSignals: rawSignals(of: f),
-                                                                     now: now,
-                                                                     directionRule: event.directionRule))
-                    state = .holding(pathIndex: pathIdx,
-                                     startRaw: startRaw, lastTriggerVal: startRaw,
-                                     ticks: 0, frozen: false, startValue: startVal)
-                    onStateChange?(gesture.name, state)
-                }
-            }
-
-        case .holding(let pathIdx, let startRaw, let lastTriggerVal, let ticks, let frozen, let startValue):
-            if !fingerStillThere(pathIdx) {
-                // 退出 → 执行 onExitHolding（解锁鼠标 + 退出震动）
-                effects.resetFrame()
-                runtime(for: gesture)?.handle(.onExitHolding, frame: FrameContext(now: now))
-                if let box = eventBox { event = box.value }
-                eventBox = nil
-                effects.eventBox = nil
-                runtimes.removeValue(forKey: gesture.id)
-                state = .idle
-                onStateChange?(gesture.name, state)
-            } else if frozen {
-                // 冻结中：检查反向滑动是否解冻
-                guard let f = edgeFinger, f.pathIndex == pathIdx else { break }
-                let raw = gesture.tickSignalSource.extract(from: f)
-                let signalDelta = raw - lastTriggerVal
-                if abs(signalDelta) >= 0.5 * gesture.tickStepNorm,
-                   event.shouldUnfreeze(signalDelta: signalDelta, startValue: startValue) {
-                    state = .holding(pathIndex: pathIdx,
-                                     startRaw: startRaw, lastTriggerVal: raw,
-                                     ticks: ticks, frozen: false, startValue: startValue)
-                    onStateChange?(gesture.name, state)
-                }
-            } else if let f = edgeFinger, f.pathIndex == pathIdx {
-                // 执行 onTick 时间线：信号→变换→量化→消费→震动/冻结 全在图上的节点决定
-                effects.resetFrame()
-                let boundary = eventBox?.value.isAtAnyBoundary() ?? false
-                runtime(for: gesture)?.handle(.onTick,
-                                             frame: FrameContext(rawSignals: rawSignals(of: f),
-                                                                 now: now,
-                                                                 directionRule: event.directionRule,
-                                                                 isAtBoundary: boundary))
-                let newFrozen = effects.freezeRequested
-                let raw = gesture.tickSignalSource.extract(from: f)
-                state = .holding(pathIndex: pathIdx,
-                                 startRaw: startRaw, lastTriggerVal: raw,
-                                 ticks: ticks, frozen: newFrozen, startValue: startValue)
-                onStateChange?(gesture.name, state)
-            }
-
-        case .cooldown(let pathIdx):
-            if !fingerStillThere(pathIdx) {
-                state = .idle
-                onStateChange?(gesture.name, state)
-            }
+            eventBox = nil
+            effects.eventBox = nil
         }
     }
 
-    // MARK: - Timeline 运行时
-
-    private func runtime(for gesture: GestureConfig) -> TimelineRuntime? {
-        if let r = runtimes[gesture.id] { return r }
-        guard let r = TimelineRuntime(timeline: gesture.timeline, effects: effects) else { return nil }
-        runtimes[gesture.id] = r
-        return r
+    /// freeze 节点执行 → 记录请求（下一帧识别器进入 frozen）
+    func requestFreeze() {
+        freezeRequested = true
     }
 
-    private func rawSignals(of t: mt_touch_t) -> [SignalSource: Float] {
-        [.normY: t.norm_y, .normX: t.norm_x, .size: t.size, .pressure: t.zPressure]
+    private var currentGestureName: String? {
+        guard let index = currentEventIndex else { return nil }
+        return config.events[index].name
+    }
+
+    // MARK: - 图执行运行时
+
+    private func runtime(for gesture: GestureConfig) -> (evaluator: GraphEvaluator, store: StateStore) {
+        if let rt = runtimes[gesture.id] { return rt }
+        guard let evaluator = GraphEvaluator(timeline: gesture.timeline) else {
+            // 图非法（环/悬挂边）：退回空执行器，避免崩溃
+            let empty = TimelineConfig(trigger: .onFirstTap)
+            let ev = GraphEvaluator(timeline: empty)!
+            let rt = (ev, StateStore())
+            runtimes[gesture.id] = rt
+            return rt
+        }
+        let rt = (evaluator, StateStore())
+        runtimes[gesture.id] = rt
+        return rt
+    }
+
+    private func rawSignals(of t: mt_touch_t?) -> [SignalSource: Float] {
+        guard let t else { return [:] }
+        return [.normY: t.norm_y, .normX: t.norm_x, .size: t.size, .pressure: t.zPressure,
+                .velX: t.vel_x, .velY: t.vel_y]
     }
 
     // MARK: - 震动（非阻塞，供 TimelineEffects 调用）
@@ -268,23 +192,5 @@ public final class GestureEngine {
         mouseDisassociated = false
     }
 
-    private func isAnyHolding() -> Bool {
-        for (_, s) in states {
-            if case .holding = s { return true }
-        }
-        return false
-    }
-
     public func restoreMouse() { associateMouse() }
-
-    /// 当前活跃的手势名（用于 UI 显示）
-    public var activeGestureName: String? {
-        for (id, s) in states {
-            if case .holding = s,
-               let g = config.gestures.first(where: { $0.id == id }) {
-                return g.name
-            }
-        }
-        return nil
-    }
 }

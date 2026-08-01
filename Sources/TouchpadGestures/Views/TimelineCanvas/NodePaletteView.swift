@@ -3,7 +3,8 @@ import SwiftUI
 import struct GestureEngine.Edge
 import GestureEngine
 
-/// 画布右侧栏：缩放控制 + 选中节点 Inspector（含边管理）+ 节点工具箱
+/// 画布左侧栏（overlay）：缩放控制 + 节点工具箱
+/// 节点属性编辑/连线管理已内嵌到节点卡片内（无外部属性编辑器）
 struct NodePaletteView: View {
     @Binding var timeline: TimelineConfig
     @Binding var selectedNodeID: UUID?
@@ -11,18 +12,13 @@ struct NodePaletteView: View {
     @Binding var pan: CGSize
     /// 画布可视尺寸（用于「适应画布」）
     let canvasSize: CGSize
-    /// 绑定可选项（region/event 节点参数面板用）
-    let events: [EventConfig]
-    let regions: [RegionConfig]
     /// 适应画布（由外层持有画布状态，此处回调）
     let onFit: () -> Void
 
     /// 新节点自动排列计数（对角线排布避免重叠）
     @State private var addCount: Int = 0
-
-    private var selectedNode: NodeConfig? {
-        timeline.nodes.first { $0.id == selectedNodeID }
-    }
+    /// 工具箱折叠状态（默认收起，省空间）
+    @State private var isPaletteExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -41,55 +37,52 @@ struct NodePaletteView: View {
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.primary.opacity(0.05)))
 
-            if let node = selectedNode, let idx = timeline.nodes.firstIndex(where: { $0.id == node.id }) {
-                // 选中节点：标题 + 可编辑参数 + 边管理
+            // 工具箱（可折叠，默认收起）
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { isPaletteExpanded.toggle() }
+            } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: node.type.symbolName)
-                        .foregroundStyle(node.type.tintColor)
-                    Text(node.title ?? node.type.displayName)
-                        .font(.subheadline.bold())
+                    Image(systemName: isPaletteExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(L10n.tr("节点工具箱", "Node Palette"))
+                        .font(.caption.bold()).foregroundStyle(.secondary)
                     Spacer()
+                    Text("\(timeline.nodes.count)")
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
                 }
-                NodeParamsEditorView(
-                    params: Binding(
-                        get: { timeline.nodes[idx].params },
-                        set: { timeline.nodes[idx].params = $0 }
-                    ),
-                    nodeType: node.type,
-                    events: events,
-                    regions: regions
-                )
-                nodeEdgeList(node)
-                Divider()
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
-            // 工具箱
-            Text(L10n.tr("节点工具箱", "Node Palette"))
-                .font(.caption.bold()).foregroundStyle(.secondary)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(NodeType.allCases, id: \.self) { type in
-                        Button {
-                            addNode(type)
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: type.symbolName)
-                                    .foregroundStyle(type.tintColor)
-                                    .frame(width: 16)
-                                Text(type.displayName)
-                                    .font(.caption)
-                                    .foregroundStyle(.primary)
-                                Spacer()
-                                Image(systemName: "plus.circle")
-                                    .font(.caption2).foregroundStyle(.secondary)
+            if isPaletteExpanded {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(NodeType.allCases, id: \.self) { type in
+                            Button {
+                                addNode(type)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: type.symbolName)
+                                        .foregroundStyle(type.tintColor)
+                                        .frame(width: 16)
+                                    Text(type.displayName)
+                                        .font(.caption)
+                                        .foregroundStyle(.primary)
+                                    Spacer()
+                                    Image(systemName: "plus.circle")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 3)
+                                .padding(.horizontal, 6)
+                                .contentShape(Rectangle())
                             }
-                            .padding(.vertical, 3)
-                            .padding(.horizontal, 6)
-                            .contentShape(Rectangle())
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
+                .frame(maxHeight: 300)
             }
         }
         .padding(10)
@@ -123,45 +116,5 @@ struct NodePaletteView: View {
         timeline.entryNodeIDs.append(node.id)
         addCount += 1
         selectedNodeID = node.id
-    }
-
-    // MARK: - 节点边管理
-
-    private func nodeEdgeList(_ node: NodeConfig) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            let incoming = timeline.incomingEdges(to: node.id)
-            let outgoing = timeline.outgoingEdges(from: node.id)
-            if incoming.isEmpty && outgoing.isEmpty {
-                Text(L10n.tr("无连线", "No connections"))
-                    .font(.caption2).foregroundStyle(.secondary)
-            } else {
-                ForEach(incoming, id: \.self) { edge in
-                    edgeRow(edge, direction: L10n.tr("入", "IN"))
-                }
-                ForEach(outgoing, id: \.self) { edge in
-                    edgeRow(edge, direction: L10n.tr("出", "OUT"))
-                }
-            }
-        }
-    }
-
-    private func edgeRow(_ edge: Edge, direction: String) -> some View {
-        HStack(spacing: 6) {
-            Text(direction)
-                .font(.caption2.monospaced()).foregroundStyle(.secondary)
-                .frame(width: 30, alignment: .leading)
-            Text(edge.from.portName + " → " + edge.to.portName)
-                .font(.caption2.monospaced())
-                .lineLimit(1)
-            Spacer()
-            Button {
-                timeline.edges.removeAll { $0 == edge }
-            } label: {
-                Image(systemName: "minus.circle")
-                    .font(.caption2).foregroundStyle(.red.opacity(0.8))
-            }
-            .buttonStyle(.borderless)
-            .help(L10n.tr("删除连线", "Remove edge"))
-        }
     }
 }

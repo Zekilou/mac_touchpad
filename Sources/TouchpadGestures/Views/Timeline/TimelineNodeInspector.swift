@@ -7,11 +7,11 @@ extension NodeType {
     /// SF Symbol 图标（按功能大类分组）
     var symbolName: String {
         switch self {
-        case .trigger:    return "bolt.fill"
+        case .pipeOut:    return "arrow.forward.circle"
         case .group:      return "square.dashed"
-        case .signal:     return "waveform.path.ecg"
+        case .touchData:  return "waveform.path.ecg"
         case .value:      return "number"
-        case .recognize:  return "hand.tap"
+        case .recognizer: return "hand.tap"
         case .region:     return "rectangle.dashed"
         case .event:      return "bolt.badge.a"
         case .transform:  return "arrow.triangle.2.circlepath"
@@ -40,9 +40,9 @@ extension NodeType {
     /// 大类配色
     var tintColor: Color {
         switch self {
-        case .trigger:                              return .yellow
+        case .pipeOut:                              return .yellow
         case .group:                                return .gray
-        case .signal, .value, .recognize, .region, .event: return .blue
+        case .touchData, .value, .recognizer, .region, .event: return .blue
         case .transform, .scale, .clamp, .abs, .sign: return .purple
         case .quantize, .gate, .debounce:           return .orange
         case .branch, .`switch`:                    return .red
@@ -72,6 +72,20 @@ extension NodeParams {
             // Optional 为空（nil）→ 跳过
             if mirror.displayStyle == .optional, mirror.children.isEmpty { return nil }
             return (label, String(describing: value))
+        }
+    }
+
+    /// 类型化的非 nil 参数行（key + 原始类型值）——卡片内编辑器据此生成真实可编辑控件
+    var typedRows: [(String, Any)] {
+        Mirror(reflecting: self).children.compactMap { label, value in
+            guard let label else { return nil }
+            let mirror = Mirror(reflecting: value)
+            // Optional：解包出真实值；nil 跳过
+            if mirror.displayStyle == .optional {
+                guard let child = mirror.children.first else { return nil }
+                return (label, child.value)
+            }
+            return (label, value)
         }
     }
 }

@@ -1,14 +1,15 @@
 import Foundation
 
-/// 手势 = 一张完全自由的节点图（v5 完全配置化）
+/// 手势 = 一张完全自由的节点图（v6 识别器节点化）
 ///
 /// 不存在「四个阶段」——整张图就是一个可自由连线的节点画布：
-///   - Trigger 节点（params.trigger）：执行入口，引擎在该时机执行其下游链
+///   - recognizer 节点：系统算法封装（轻点/双击/保持识别状态机），无输入，输出时机脉冲
+///   - pipeOut 节点（params.trigger）：链入口，收到识别器脉冲 → 透传启动下游
 ///     （onFirstTap / onEnterHolding / onTick / onExitHolding ...）
-///   - 逻辑节点：信号/变换/量化/分支/副作用等，任意连线到任意 Trigger 下游
+///   - 逻辑节点：信号/变换/量化/分支/副作用等，任意连线到任意链下游
 ///   - Group 节点：批注组框，纯视觉分组，不参与执行
 ///   - RegionRef / EventRef：手势绑定的区域/事件（也是图节点）
-/// 旧 v3 配置（4 条独立 timeline）解码时自动合并为单图（每个阶段补 Trigger 入口）。
+/// 旧 v3 配置（4 条独立 timeline）解码时自动合并为单图（每个阶段补管道出口入口）。
 public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
     // MARK: - 稳定 ID（不随版本变）
 
@@ -69,6 +70,8 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         } else {
             timeline = TimelineConfig(trigger: .onFirstTap)
         }
+        // 旧图兼容：signal → touchData 后修正输出连线端口（"value" → source 字段名）
+        Self.normalizeLegacyNodes(&timeline)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -86,18 +89,18 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         var edges: [Edge] = []
         var entries: [UUID] = []
         let yOffsets: [TriggerEvent: Double] = [
-            .onFirstTap: 0, .onEnterHolding: 400, .onSecondTap: 400,
-            .onTick: 800, .onBoundaryHit: 800, .onExitHolding: 1200,
+            .onFirstTap: 0, .onEnterHolding: 260, .onSecondTap: 260,
+            .onTick: 520, .onBoundaryHit: 520, .onExitHolding: 780,
         ]
         for tl in timelines {
             let dy = yOffsets[tl.trigger] ?? 0
-            // Trigger 入口节点
-            let trigger = NodeConfig(type: .trigger,
-                                     params: NodeParams(trigger: tl.trigger),
-                                     x: -240, y: dy + 20,
-                                     title: tl.trigger.displayName)
-            nodes.append(trigger)
-            entries.append(trigger.id)
+            // 管道出口节点（原 v3 的 Trigger 入口，合并后作链入口）
+            let pipe = NodeConfig(type: .pipeOut,
+                                  params: NodeParams(trigger: tl.trigger),
+                                  x: -200, y: dy + 20,
+                                  title: tl.trigger.displayName)
+            nodes.append(pipe)
+            entries.append(pipe.id)
             // 阶段节点垂直堆叠
             for node in tl.nodes {
                 var n = node
@@ -105,13 +108,65 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
                 nodes.append(n)
             }
             edges.append(contentsOf: tl.edges)
-            // 入口节点连到 Trigger
+            // 入口节点连到管道出口
             for entryID in tl.entryNodeIDs where tl.nodes.contains(where: { $0.id == entryID }) {
-                edges.append(Edge(from: PortID(nodeID: trigger.id, portName: "output"),
-                                  to: PortID(nodeID: entryID, portName: "input")))
+                edges.append(Edge(from: PortID(nodeID: pipe.id, portName: "trigger"),
+                                  to: PortID(nodeID: entryID, portName: "trigger")))
             }
         }
         return TimelineConfig(trigger: .onFirstTap, nodes: nodes, edges: edges, entryNodeIDs: entries)
+    }
+
+    /// 旧图兼容修正（decode 后调用）：
+    /// 1) 旧 signal 节点经 NodeType 自定义 decode 已变为 touchData，输出连线端口 "value" → source 字段端口，清 source 参数
+    /// 2) 旧端口名（input/output/true/false/output1/output2）→ 注册表端口名（value/result/tick/out1/out2/data/trigger）
+    static func normalizeLegacyNodes(_ timeline: inout TimelineConfig) {
+        // 1) touchData 单选 source → 字段端口
+        for i in timeline.nodes.indices where timeline.nodes[i].type == .touchData {
+            guard let field = timeline.nodes[i].params.source else { continue }
+            let targetPort = field.rawValue
+            for j in timeline.edges.indices
+            where timeline.edges[j].from.nodeID == timeline.nodes[i].id
+                && timeline.edges[j].from.portName == "value" {
+                timeline.edges[j].from.portName = targetPort
+            }
+            // touchData 是多输出节点，不再需要单选 source 参数
+            timeline.nodes[i].params.source = nil
+        }
+        // 2) 旧端口名迁移（按节点类型映射到注册表端口名）
+        let typesByID = Dictionary(uniqueKeysWithValues: timeline.nodes.map { ($0.id, $0.type) })
+        for j in timeline.edges.indices {
+            let edge = timeline.edges[j]
+            if let fromType = typesByID[edge.from.nodeID] {
+                timeline.edges[j].from.portName = migratedFromPort(fromType, edge.from.portName)
+            }
+            if let toType = typesByID[edge.to.nodeID] {
+                timeline.edges[j].to.portName = migratedToPort(toType, edge.to.portName)
+            }
+        }
+    }
+
+    /// 来源端口旧名 → 注册表输出端口名
+    private static func migratedFromPort(_ type: NodeType, _ old: String) -> String {
+        switch old {
+        case "true":      return "out1"
+        case "false":     return "out2"
+        case "output1":   return "out1"
+        case "output2":   return "out2"
+        case "output":    return NodeTypeDef.outputSockets(of: type).first?.name ?? old
+        default:          return old
+        }
+    }
+
+    /// 目标端口旧名 → 注册表输入端口名（旧 "input" 是该节点第一个输入；branch 特例 → value）
+    private static func migratedToPort(_ type: NodeType, _ old: String) -> String {
+        switch old {
+        case "input":
+            if type == .branch { return "value" }
+            return NodeTypeDef.inputSockets(of: type).first?.name ?? "trigger"
+        default:
+            return old
+        }
     }
 
     // MARK: - 绑定（图节点权威，存储字段回退）
@@ -152,10 +207,10 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         }
     }
 
-    // MARK: - 识别参数（从图的 RecognizeNode 提取）
+    // MARK: - 识别参数（从图的识别器节点提取）
 
     public var recognizeParams: NodeParams? {
-        timeline.firstNode(of: .recognize)?.params
+        timeline.firstNode(of: .recognizer)?.params
     }
 
     /// 第一次轻点最大持续时间（秒）
@@ -169,9 +224,11 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
 
     // MARK: - 信号源/步长（引擎从单图读取）
 
-    /// onTick 链的信号源（图中唯一 signal 节点）
+    /// onTick 链的信号源（touchData → transform 的连线端口名 = SignalSource）
     public var tickSignalSource: SignalSource {
-        timeline.firstNode(of: .signal)?.params.source ?? .normY
+        guard let td = timeline.firstNode(of: .touchData) else { return .normY }
+        guard let port = timeline.outgoingEdges(from: td.id).first?.from.portName else { return .normY }
+        return SignalSource(rawValue: port) ?? .normY
     }
 
     /// onTick 链的量化步长（图中唯一 quantize 节点）

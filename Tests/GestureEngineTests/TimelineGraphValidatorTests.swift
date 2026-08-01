@@ -15,7 +15,7 @@ final class TimelineGraphValidatorTests: XCTestCase {
     // MARK: - valid
 
     func testValidLinearGraph() {
-        let a = makeNode(.signal)
+        let a = makeNode(.touchData)
         let b = makeNode(.transform)
         let c = makeNode(.quantize)
         let timeline = TimelineConfig(trigger: .onTick,
@@ -58,7 +58,7 @@ final class TimelineGraphValidatorTests: XCTestCase {
     // MARK: - cycle
 
     func testCycleDetected() {
-        let a = makeNode(.signal)
+        let a = makeNode(.touchData)
         let b = makeNode(.state)
         let timeline = TimelineConfig(trigger: .onTick,
                                       nodes: [a, b],
@@ -86,7 +86,7 @@ final class TimelineGraphValidatorTests: XCTestCase {
     // MARK: - danglingEdge
 
     func testDanglingEdgeDetected() {
-        let a = makeNode(.signal)
+        let a = makeNode(.touchData)
         let ghost = UUID()
         let badEdge = Edge(from: PortID(nodeID: a.id, portName: "output"),
                            to: PortID(nodeID: ghost, portName: "input"))
@@ -104,7 +104,7 @@ final class TimelineGraphValidatorTests: XCTestCase {
     // MARK: - noEntry
 
     func testNoEntryDetected() {
-        let a = makeNode(.signal)
+        let a = makeNode(.touchData)
         let b = makeNode(.transform)
         let timeline = TimelineConfig(trigger: .onTick,
                                       nodes: [a, b],
@@ -115,7 +115,7 @@ final class TimelineGraphValidatorTests: XCTestCase {
     }
 
     func testEntryReferencingMissingNodeIsDangling() {
-        let a = makeNode(.signal)
+        let a = makeNode(.touchData)
         let ghost = UUID()
         let timeline = TimelineConfig(trigger: .onTick,
                                       nodes: [a],
@@ -130,7 +130,7 @@ final class TimelineGraphValidatorTests: XCTestCase {
     // MARK: - reachableNodes
 
     func testReachableNodes_CoversConnectedChain() {
-        let a = makeNode(.signal)
+        let a = makeNode(.touchData)
         let b = makeNode(.transform)
         let c = makeNode(.quantize)
         let timeline = TimelineConfig(trigger: .onTick,
@@ -142,7 +142,7 @@ final class TimelineGraphValidatorTests: XCTestCase {
     }
 
     func testReachableNodes_ExcludesOrphanNode() {
-        let a = makeNode(.signal)
+        let a = makeNode(.touchData)
         let orphan = makeNode(.notify)
         let timeline = TimelineConfig(trigger: .onTick,
                                       nodes: [a, orphan],

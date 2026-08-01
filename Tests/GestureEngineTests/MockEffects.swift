@@ -25,4 +25,9 @@ final class MockEffects: TimelineEffects {
     func unlockMouse() { unlockCount += 1 }
     func freeze() { freezeCount += 1 }
     func notify(label: String) { notifyLabels.append(label) }
+    func recognizerState(holding: Bool) {
+        holdingCount = max(0, holdingCount + (holding ? 1 : -1))
+    }
+    /// 识别器 holding 状态计数（可断言进入/退出次数）
+    private(set) var holdingCount = 0
 }
