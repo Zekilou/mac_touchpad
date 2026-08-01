@@ -158,7 +158,7 @@ final class EventConfigTests: XCTestCase {
     func testIsAtBoundary_volumeMock() {
         // 注意：currentValue 会读真实系统音量，这里无法直接 mock；
         // 只验证 direction 语义（>0 / <0）通过 boundaryThreshold 辅助对比
-        let event = EventConfig.defaultVolume
+        var event = EventConfig.defaultVolume
         // 逻辑上 isAtBoundary(direction:) 需要 currentValue，在单元测试无法 mock 系统 API 时
         // 保证至少不崩溃
         _ = event.isAtBoundary(direction: 1)

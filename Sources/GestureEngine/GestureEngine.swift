@@ -138,7 +138,9 @@ public final class GestureEngine {
                     onStateChange?(gesture.name, state)
                 } else if now - startTime > gesture.holdMinDuration {
                     let startRaw = gesture.signalSource.extract(from: edgeFinger ?? touches.first!)
-                    let startVal = event.currentValue()
+                    // 重置追踪值，用追踪值获取起始系统值（避免 getBrightness 不准）
+                    event.resetTracking()
+                    let startVal = event.trackedCurrentValue()
                     // 进入 holding 时若事件在边界，发送朝边界外的媒体键唤起 HUD
                     event.postBoundaryKeyOnEnterIfNeeded()
                     state = .holding(pathIndex: pathIdx,

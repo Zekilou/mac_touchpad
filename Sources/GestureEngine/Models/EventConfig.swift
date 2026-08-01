@@ -124,6 +124,10 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
     /// 执行方式：媒体键（HUD）or 直接 API（精确值）
     public var executionMethod: ExecutionMethod
 
+    /// 本地追踪值：mediaKey 模式下不依赖系统读取（getBrightness 可能不准）
+    /// 非 Codable，解码后为 nil，首次使用时从系统读取初始化
+    private var trackedValue: Float? = nil
+
     /// Codable 兼容：旧 JSON 缺 directionRule / executionMethod 时填默认值
     enum CodingKeys: String, CodingKey {
         case id, name, actionType, step, boundaryThreshold
@@ -190,6 +194,20 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
         }
     }
 
+    /// 重置追踪值（进入新 holding 时调用）
+    public mutating func resetTracking() {
+        trackedValue = nil
+    }
+
+    /// 获取追踪值（首次自动从系统读取初始化）
+    /// mediaKey 模式下用追踪值做边界判断，避免 getBrightness() 不准
+    public mutating func trackedCurrentValue() -> Float {
+        if let v = trackedValue { return v }
+        let v = currentValue()
+        trackedValue = v
+        return v
+    }
+
     // MARK: - 边界（内部辅助）
 
     /// 判断当前值是否在「目标方向」的边界上
@@ -201,8 +219,8 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
     }
 
     /// 判断当前值是否在任一边界（用于进入 holding 时唤起 HUD）
-    public func isAtAnyBoundary() -> Bool {
-        let value = currentValue()
+    public mutating func isAtAnyBoundary() -> Bool {
+        let value = trackedCurrentValue()
         return value <= boundaryThreshold || value >= 1.0 - boundaryThreshold
     }
 
@@ -237,7 +255,7 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
         }
 
         // --- 步骤2：边界预检 ---
-        let current = currentValue()
+        let current = trackedCurrentValue()
         let alreadyAtBoundary = isAtBoundary(targetDirection: targetDir, value: current)
         if alreadyAtBoundary {
             // 已经在边界且继续朝外：冻结，不执行
@@ -268,8 +286,17 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
             SystemControl.setBrightness(target)
         }
 
-        // --- 步骤4：边界后检（调节后是否首次贴边）---
-        let after = currentValue()
+        // --- 步骤4：边界后检 ---
+        let after: Float
+        if executionMethod == .mediaKey {
+            // mediaKey：用追踪值推进（getBrightness 可能不准）
+            trackedValue = max(0.0, min(1.0, current + totalDelta))
+            after = trackedValue!
+        } else {
+            // direct：从系统读取精确值
+            after = currentValue()
+            trackedValue = after
+        }
         let hitBoundary = isAtBoundary(targetDirection: targetDir, value: after)
         if hitBoundary {
             postBoundaryKeyIfNeeded()
@@ -299,7 +326,7 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
     }
 
     /// 进入 holding 时如果当前值已在边界，立即发一次 HUD（值不变）
-    public func postBoundaryKeyOnEnterIfNeeded() {
+    public mutating func postBoundaryKeyOnEnterIfNeeded() {
         guard isAtAnyBoundary() else { return }
         postBoundaryKeyIfNeeded()
     }
