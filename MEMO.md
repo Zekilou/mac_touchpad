@@ -736,6 +736,7 @@ public struct GestureConfig: ... {
 - 删除死代码：TimelineRuntime.swift/GestureState.swift/TimelineRuntimeTests.swift（引擎直接用 GraphEvaluator）
 - touchData 加可选 trigger 输入（pipeOut 门控）；pipeOut 加 trigger 输入（透传）
 - **用户决定：多层画布/子图（系统算法内部也用节点配置、可点进去改）先搁置**，NodeConfig.subgraph 字段已预留，后续需要再做
+- **P6 迁移器修复（2026-08-02）**：region/event refs 只在顶层添加一次（原 buildRecognizeBlock 重复添加导致 onFirstTap 管道出口连 refs）；onFirstTap 块置空（识别在 recognizer 根完成）；用户旧 v5 配置已删除，手写新 P6 结构 config.json（19 节点/16 边 × 2 手势，拓扑有效，refs 纯参数无连线）
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)

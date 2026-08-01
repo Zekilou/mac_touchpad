@@ -117,8 +117,8 @@ public enum TimelineMigrator {
         }
 
         let blocks: [(trigger: TriggerEvent, pulse: String, block: Block, dy: Double)] = [
-            // onFirstTap：识别参数已在 recognizer 根节点；块内仅绑定引用（无执行）
-            (.onFirstTap, "firstTap", buildRecognizeBlock(regionID: regionID, eventID: eventID), 0),
+            // onFirstTap：识别在 recognizer 根节点完成，块为空（仅管道出口作链入口标记）
+            (.onFirstTap, "firstTap", Block([], [], []), 0),
             (.onEnterHolding, "enterHolding", buildEnterBlock(pipeline), 260),
             (.onTick, "tick", buildTickBlock(pipeline, event: event), 520),
             (.onExitHolding, "exitHolding", buildExitBlock(pipeline), 780),
@@ -142,37 +142,6 @@ public enum TimelineMigrator {
         }
 
         return TimelineConfig(trigger: .onFirstTap, nodes: nodes, edges: edges, entryNodeIDs: entries)
-    }
-
-    // MARK: - onFirstTap（绑定引用）
-
-    private static func buildRecognizeBlock(regionID: UUID?, eventID: UUID?) -> Block {
-        var nodes: [NodeConfig] = []
-        var entries: [UUID] = []
-
-        // RegionRefNode：手势绑定的触发区域（参数承载）
-        if let regionID {
-            let node = NodeConfig(
-                type: .region,
-                params: NodeParams(regionID: regionID),
-                x: 0, y: 0, title: "触发区域"
-            )
-            nodes.append(node)
-            entries.append(node.id)
-        }
-
-        // EventRefNode：手势绑定的事件（参数承载）
-        if let eventID {
-            let node = NodeConfig(
-                type: .event,
-                params: NodeParams(eventID: eventID),
-                x: 200, y: 0, title: "绑定事件"
-            )
-            nodes.append(node)
-            entries.append(node.id)
-        }
-
-        return (nodes, [], entries)
     }
 
     // MARK: - onEnterHolding
