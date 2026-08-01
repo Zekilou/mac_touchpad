@@ -89,18 +89,26 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(rightGesture.tapMaxDuration, 0.2)
     }
 
-    func testV1Migration_bindingsCorrect() throws {
+    func testV1Migration_bindingsLandsInRefNodes() throws {
         let v1Data = try makeV1JSON()
         let v1 = try JSONDecoder().decode(ConfigStore.V1Config.self, from: v1Data)
-        let v2 = ConfigStore.migrate(v1: v1)
+        let v3 = ConfigStore.migrate(v1: v1)
 
-        let leftGesture = v2.gestures.first { $0.name == "左侧" }!
-        let brightness = v2.events.first { $0.actionType == .brightness }!
-        XCTAssertEqual(leftGesture.eventID, brightness.id)
+        let leftGesture = v3.gestures.first { $0.name == "左侧" }!
+        let leftRegion = v3.regions[0]
+        let brightness = v3.events.first { $0.actionType == .brightness }!
+        // 绑定写入 onFirstTap 图的 ref 节点（图权威）
+        let leftTap = leftGesture.timeline(for: .onFirstTap)!
+        XCTAssertEqual(leftTap.firstNode(of: .region)?.params.regionID, leftRegion.id)
+        XCTAssertEqual(leftTap.firstNode(of: .event)?.params.eventID, brightness.id)
+        // bound 属性从图读取
+        XCTAssertEqual(leftGesture.boundRegionID, leftRegion.id)
+        XCTAssertEqual(leftGesture.boundEventID, brightness.id)
 
-        let rightGesture = v2.gestures.first { $0.name == "右侧" }!
-        let volume = v2.events.first { $0.actionType == .volume }!
-        XCTAssertEqual(rightGesture.eventID, volume.id)
+        let rightGesture = v3.gestures.first { $0.name == "右侧" }!
+        let volume = v3.events.first { $0.actionType == .volume }!
+        XCTAssertEqual(rightGesture.boundEventID, volume.id)
+        XCTAssertEqual(rightGesture.boundRegionID, v3.regions[1].id)
     }
 
     func testV2CodableRoundTrip() throws {

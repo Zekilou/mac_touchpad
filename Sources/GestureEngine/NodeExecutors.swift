@@ -32,6 +32,10 @@ public enum NodeExecutors {
         case .recognize:
             return .init()
 
+        // 绑定引用：纯参数承载（无执行逻辑）
+        case .region, .event:
+            return .init()
+
         // MARK: 数学/变换
         case .transform:
             guard let v = inputs["input"]?.floatValue else { return .init() }

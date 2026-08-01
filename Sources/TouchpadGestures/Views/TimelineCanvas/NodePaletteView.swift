@@ -11,6 +11,9 @@ struct NodePaletteView: View {
     @Binding var pan: CGSize
     /// 画布可视尺寸（用于「适应画布」）
     let canvasSize: CGSize
+    /// 绑定可选项（region/event 节点参数面板用）
+    let events: [EventConfig]
+    let regions: [RegionConfig]
 
     /// 新节点自动排列计数（对角线排布避免重叠）
     @State private var addCount: Int = 0
@@ -50,7 +53,9 @@ struct NodePaletteView: View {
                         get: { timeline.nodes[idx].params },
                         set: { timeline.nodes[idx].params = $0 }
                     ),
-                    nodeType: node.type
+                    nodeType: node.type,
+                    events: events,
+                    regions: regions
                 )
                 nodeEdgeList(node)
                 Divider()

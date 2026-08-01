@@ -40,6 +40,8 @@ public enum NodeType: String, Codable, CaseIterable {
     case signal, value
     // 触发识别（状态机参数）
     case recognize
+    // 绑定引用（手势↔区域/事件 关联）
+    case region, event
     // 数学/变换
     case transform, scale, clamp, abs, sign
     // 量化/门控
@@ -58,6 +60,9 @@ public enum NodeType: String, Codable, CaseIterable {
         case .value:     return L10n.tr("常量值", "Value")
         // 触发识别
         case .recognize: return L10n.tr("触发识别", "Recognize")
+        // 绑定引用
+        case .region:    return L10n.tr("区域引用", "Region Ref")
+        case .event:     return L10n.tr("事件引用", "Event Ref")
         // 数学/变换
         case .transform: return L10n.tr("变换", "Transform")
         case .scale:     return L10n.tr("缩放", "Scale")
@@ -114,6 +119,9 @@ public struct NodeParams: Codable, Hashable {
     public var tapMaxDrift: Float?       // recognize
     public var tapMaxGap: Double?        // recognize
     public var holdMinDuration: Double?  // recognize
+    // 绑定引用
+    public var regionID: UUID?           // region
+    public var eventID: UUID?            // event
     // 变换
     public var transform: TransformMode? // transform
     public var multiplier: Float?        // scale
@@ -157,6 +165,8 @@ public struct NodeParams: Codable, Hashable {
                 tapMaxDrift: Float? = nil,
                 tapMaxGap: Double? = nil,
                 holdMinDuration: Double? = nil,
+                regionID: UUID? = nil,
+                eventID: UUID? = nil,
                 transform: TransformMode? = nil,
                 multiplier: Float? = nil,
                 offset: Float? = nil,
@@ -189,6 +199,8 @@ public struct NodeParams: Codable, Hashable {
         self.tapMaxDrift = tapMaxDrift
         self.tapMaxGap = tapMaxGap
         self.holdMinDuration = holdMinDuration
+        self.regionID = regionID
+        self.eventID = eventID
         self.transform = transform
         self.multiplier = multiplier
         self.offset = offset
@@ -228,6 +240,8 @@ public struct NodeParams: Codable, Hashable {
         case "tapMaxDrift":    p.tapMaxDrift = value as? Float
         case "tapMaxGap":      p.tapMaxGap = value as? Double
         case "holdMinDuration": p.holdMinDuration = value as? Double
+        case "regionID":       p.regionID = value as? UUID
+        case "eventID":        p.eventID = value as? UUID
         case "transform":      p.transform = value as? TransformMode
         case "multiplier":     p.multiplier = value as? Float
         case "offset":         p.offset = value as? Float

@@ -7,6 +7,9 @@ import GestureEngine
 /// - 编辑实时写回 config（编辑即生效）
 struct TimelineEditorSection: View {
     @Binding var timelines: [TimelineConfig]
+    /// 绑定可选项（region/event 引用节点参数面板数据源）
+    let events: [EventConfig]
+    let regions: [RegionConfig]
 
     @State private var selectedTrigger: TriggerEvent = .onFirstTap
     @State private var zoom: CGFloat = 1
@@ -59,7 +62,9 @@ struct TimelineEditorSection: View {
                                         selectedNodeID: $selectedNodeID,
                                         zoom: $zoom,
                                         pan: $pan,
-                                        canvasSize: geo.size)
+                                        canvasSize: geo.size,
+                                        events: events,
+                                        regions: regions)
                     }
                 }
                 .frame(minHeight: 420)

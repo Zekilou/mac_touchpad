@@ -55,8 +55,11 @@ public final class GestureEngine {
 
         for i in 0..<config.gestures.count {
             let gesture = config.gestures[i]
-            guard let region = config.regions.first(where: { $0.id == gesture.regionID }),
-                  let eventIndex = config.events.firstIndex(where: { $0.id == gesture.eventID }) else { continue }
+            // 绑定从 onFirstTap 图的 RegionRef/EventRef 节点读取（旧文件回退顶层字段）
+            guard let regionID = gesture.boundRegionID,
+                  let eventID = gesture.boundEventID,
+                  let region = config.regions.first(where: { $0.id == regionID }),
+                  let eventIndex = config.events.firstIndex(where: { $0.id == eventID }) else { continue }
             if states[gesture.id] == nil { states[gesture.id] = .idle }
             processGesture(gesture, region: region,
                            event: &config.events[eventIndex],

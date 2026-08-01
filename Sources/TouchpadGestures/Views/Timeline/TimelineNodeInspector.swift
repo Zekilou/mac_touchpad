@@ -10,6 +10,8 @@ extension NodeType {
         case .signal:     return "waveform.path.ecg"
         case .value:      return "number"
         case .recognize:  return "hand.tap"
+        case .region:     return "rectangle.dashed"
+        case .event:      return "bolt.badge.a"
         case .transform:  return "arrow.triangle.2.circlepath"
         case .scale:      return "arrow.up.left.and.arrow.down.right"
         case .clamp:      return "rectangle.compress.vertical"
@@ -36,7 +38,7 @@ extension NodeType {
     /// 大类配色
     var tintColor: Color {
         switch self {
-        case .signal, .value, .recognize:               return .blue
+        case .signal, .value, .recognize, .region, .event: return .blue
         case .transform, .scale, .clamp, .abs, .sign: return .purple
         case .quantize, .gate, .debounce:           return .orange
         case .branch, .`switch`:                    return .red

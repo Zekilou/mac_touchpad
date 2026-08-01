@@ -56,6 +56,24 @@ final class TimelineMigratorTests: XCTestCase {
         XCTAssertTrue(timeline.entryNodeIDs.contains(recognize!.id))
     }
 
+    func testRecognizeTimeline_WithBindings_GeneratesRefNodes() {
+        let region = UUID()
+        let event = UUID()
+        let timeline = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent(),
+                                                regionID: region, eventID: event)[0]
+        // 绑定引用节点（区域 + 事件）
+        let regionRef = timeline.firstNode(of: .region)
+        let eventRef = timeline.firstNode(of: .event)
+        XCTAssertEqual(regionRef?.params.regionID, region)
+        XCTAssertEqual(eventRef?.params.eventID, event)
+        XCTAssertTrue(timeline.entryNodeIDs.contains(regionRef!.id))
+        XCTAssertTrue(timeline.entryNodeIDs.contains(eventRef!.id))
+        // 不带绑定时无 ref 节点
+        let plain = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[0]
+        XCTAssertNil(plain.firstNode(of: .region))
+        XCTAssertNil(plain.firstNode(of: .event))
+    }
+
     // MARK: - onEnterHolding
 
     func testEnterTimeline_ContainsBaselineNode() {

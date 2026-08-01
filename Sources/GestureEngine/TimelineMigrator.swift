@@ -66,19 +66,49 @@ public struct LegacyPipelineConfig {
 public enum TimelineMigrator {
 
     /// 生成 4 条 Timeline（v2 配置的等价图）
-    public static func migrate(pipeline: LegacyPipelineConfig, event: EventConfig) -> [TimelineConfig] {
+    /// - Parameters:
+    ///   - regionID / eventID: 手势绑定（非 nil 时在 onFirstTap 图生成 RegionRef/EventRef 节点）
+    public static func migrate(pipeline: LegacyPipelineConfig, event: EventConfig,
+                               regionID: UUID? = nil, eventID: UUID? = nil) -> [TimelineConfig] {
         var timelines: [TimelineConfig] = []
-        timelines.append(buildRecognizeTimeline(pipeline))
+        timelines.append(buildRecognizeTimeline(pipeline, regionID: regionID, eventID: eventID))
         timelines.append(buildEnterTimeline(pipeline))
         timelines.append(buildTickTimeline(pipeline, event: event))
         timelines.append(buildExitTimeline(pipeline))
         return timelines
     }
 
-    // MARK: - onFirstTap（触发识别）
+    // MARK: - onFirstTap（触发识别 + 绑定引用）
 
-    private static func buildRecognizeTimeline(_ p: LegacyPipelineConfig) -> TimelineConfig {
-        let node = NodeConfig(
+    private static func buildRecognizeTimeline(_ p: LegacyPipelineConfig,
+                                               regionID: UUID?, eventID: UUID?) -> TimelineConfig {
+        var nodes: [NodeConfig] = []
+        var entries: [UUID] = []
+
+        // 1. RegionRefNode：手势绑定的触发区域
+        if let regionID {
+            let node = NodeConfig(
+                type: .region,
+                params: NodeParams(regionID: regionID),
+                x: 0, y: 0, title: "触发区域"
+            )
+            nodes.append(node)
+            entries.append(node.id)
+        }
+
+        // 2. EventRefNode：手势绑定的事件
+        if let eventID {
+            let node = NodeConfig(
+                type: .event,
+                params: NodeParams(eventID: eventID),
+                x: 200, y: 0, title: "绑定事件"
+            )
+            nodes.append(node)
+            entries.append(node.id)
+        }
+
+        // 3. RecognizeNode：轻点识别参数
+        let recognize = NodeConfig(
             type: .recognize,
             params: NodeParams(
                 tapMaxDuration: p.tapMaxDuration,
@@ -86,9 +116,12 @@ public enum TimelineMigrator {
                 tapMaxGap: p.tapMaxGap,
                 holdMinDuration: p.holdMinDuration
             ),
-            x: 0, y: 0, title: "轻点识别"
+            x: 0, y: 60, title: "轻点识别"
         )
-        return TimelineConfig(trigger: .onFirstTap, nodes: [node], edges: [], entryNodeIDs: [node.id])
+        nodes.append(recognize)
+        entries.append(recognize.id)
+
+        return TimelineConfig(trigger: .onFirstTap, nodes: nodes, edges: [], entryNodeIDs: entries)
     }
 
     // MARK: - onEnterHolding

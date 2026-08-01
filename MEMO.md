@@ -606,6 +606,7 @@ public struct GestureConfig: ... {
 | **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）| **✓ 已完成**（2026-08-01，91 tests 通过）|
 | **M4-C1：Timeline 数据层 UI** | 迁移预览（3 条图节点/边/端口列表）+ 节点属性面板 + 拓扑验证状态；Canvas 画布留待 M4-C2 | Views/Timeline/ + GestureTabView 卡片 | 小 | **✓ 已完成**（2026-08-01，91 tests 通过）|
 | **M4-C2：Canvas 画布** | SwiftUI Canvas 自绘：节点拖拽/端口连线/缩放平移/工具箱面板 | Views/TimelineCanvas/ | 大（2-3天）| **✓ 已完成**（2026-08-01，91 tests 通过）|
+| **M7/v4：绑定节点化** | 绑定事件/区域也进图（EventRef/RegionRef 节点），页面只剩一张画布；波形对照并入参数面板 | NodeType.region/event + GestureTabView 单卡 | 小 | **✓ 已完成**（2026-08-01，94 tests 通过）|
 | **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 | 待办 |
 | **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 | 待办 |
 
@@ -661,6 +662,15 @@ public struct GestureConfig: ... {
 4. **UI**：GestureTabView = 绑定卡片 + 「手势节点图」画布编辑器主体 + 波形对照（从图读）；TimelineEditorSection（4 条图 trigger 切换 + 画布 + 侧栏，编辑实时写回 config）；NodeParamsEditorView（可编辑参数面板：数值 TextField/Stepper、开关、枚举 Picker，写入 NodeParams.setting）；删除 TimelinePreviewView/只读 Inspector
 5. 新增测试：recognize 参数迁移、4 条图结构、v1→v3 stepNorm/识别参数落图；总 93 tests 通过
 6. 教训：`Edge`/`Comparator`/`Predicate` 与系统同名类型冲突需 `import struct/enum GestureEngine.X` 消歧；NodeParams 便捷 init 参数必须按声明顺序
+
+### v4 全节点化（绑定进图，2026-08-01 完成，94 tests 通过）
+用户确认「全部要节点化」：绑定事件/触发区域也进图，手势页面只剩一张画布。
+1. **数据层**：NodeType 新增 .region（区域引用）/ .event（事件引用）+ NodeParams 新增 regionID/eventID: UUID? + setting 写入；GestureConfig.regionID/eventID 改 Optional 存储（旧 v3 兼容回退），新增 boundRegionID/boundEventID 计算属性（onFirstTap 图 RegionRef/EventRef 节点优先，顶层字段回退）
+2. **迁移**：TimelineMigrator.migrate 增加 regionID/eventID 参数（默认 nil，不破坏旧调用），onFirstTap 图生成 触发区域/绑定事件 两个 ref 节点（entry）；ConfigStore migrate(v2:)/migrate(v1:) 传入绑定
+3. **引擎**：GestureEngine 改用 gesture.boundRegionID/boundEventID（guard let 三元解析）
+4. **UI**：GestureTabView 删除 绑定事件/触发区域/波形对照 三张卡片，只剩「手势节点图」单卡；NodeParamsEditorView 支持 UUID Picker（eventID→事件名列表 / regionID→区域名列表）+ waveform 行内联手感描述；NodePaletteView/TimelineEditorSection 透传 events/regions；删除 HapticWaveformReference.swift
+5. 测试：+2（ref 节点生成、v1 迁移绑定落图断言改为 bound 属性），总 94 tests 通过
+6. 注：旧 v3 config.json（顶层有 regionID/eventID 但图上无 ref 节点）解码后 bound 属性回退顶层字段，行为不变；保存后图上仍无 ref 节点（不强制迁移），如需彻底迁移可加 normalize 步骤
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)

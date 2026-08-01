@@ -1,18 +1,21 @@
 import Foundation
 
-/// 手势 = 绑定（区域/事件）+ Timeline 图集（v3 节点化）
+/// 手势 = Timeline 图集（v3+ 节点化，绑定也进图）
 ///
-/// 全部行为参数（轻点识别/信号处理/触觉/鼠标）都在 timelines 的节点图上：
-///   - onFirstTap：RecognizeNode（轻点识别参数）
+/// 全部行为参数都在 timelines 的节点图上（区域/事件引用、轻点识别、信号处理、触觉、鼠标）：
+///   - onFirstTap：RegionRef + EventRef + RecognizeNode（绑定 + 轻点识别参数）
 ///   - onEnterHolding / onTick / onExitHolding：执行图
-/// 旧 v2 配置在 AppConfig 解码层自动迁移为图集。
+/// 旧配置（v1/v2/v3 顶层 regionID/eventID）在解码层自动迁移进图；regionID/eventID 存储字段
+/// 仅作旧文件兼容回退（图节点优先）。
 public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
     // MARK: - 稳定 ID（不随版本变）
 
     public let id: UUID
     public var name: String
-    public var regionID: UUID
-    public var eventID: UUID
+
+    /// 旧 v3 顶层绑定（v4 迁移后置 nil；仅作解码回退，权威在图节点）
+    public var regionID: UUID?
+    public var eventID: UUID?
 
     /// 全部 Timeline 图（识别 1 条 + 执行 3 条）
     public var timelines: [TimelineConfig]
@@ -29,7 +32,7 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         self.timelines = timelines
     }
 
-    /// 便捷：用默认管线 + 指定事件生成图集
+    /// 便捷：用默认管线 + 指定事件/区域生成图集（含绑定 ref 节点）
     public init(id: UUID = UUID(),
                 name: String,
                 regionID: UUID,
@@ -40,7 +43,25 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         self.name = name
         self.regionID = regionID
         self.eventID = eventID
-        self.timelines = TimelineMigrator.migrate(pipeline: pipeline, event: event)
+        self.timelines = TimelineMigrator.migrate(pipeline: pipeline, event: event,
+                                                  regionID: regionID, eventID: eventID)
+    }
+
+    // MARK: - 绑定（图节点权威，存储字段回退）
+
+    /// onFirstTap 图中的绑定引用节点
+    private func refNode(of type: NodeType) -> NodeConfig? {
+        timelines.first { $0.trigger == .onFirstTap }?.nodes.first { $0.type == type }
+    }
+
+    /// 绑定的区域（图 RegionRef 优先，旧 v3 顶层字段回退）
+    public var boundRegionID: UUID? {
+        refNode(of: .region)?.params.regionID ?? regionID
+    }
+
+    /// 绑定的事件（图 EventRef 优先，旧 v3 顶层字段回退）
+    public var boundEventID: UUID? {
+        refNode(of: .event)?.params.eventID ?? eventID
     }
 
     // MARK: - 识别参数（从 onFirstTap 图的 RecognizeNode 提取）
