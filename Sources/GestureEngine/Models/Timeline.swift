@@ -114,6 +114,7 @@ public struct NodeParams: Codable, Hashable {
     // 量化
     public var stepNorm: Float?          // quantize
     public var sensitivity: Float?       // quantize
+    public var triggerMode: TriggerMode? // quantize（discrete/continuous）
     // 门控
     public var threshold: Float?         // gate
     public var comparator: Comparator?   // gate
@@ -150,6 +151,7 @@ public struct NodeParams: Codable, Hashable {
                 max: Float? = nil,
                 stepNorm: Float? = nil,
                 sensitivity: Float? = nil,
+                triggerMode: TriggerMode? = nil,
                 threshold: Float? = nil,
                 comparator: Comparator? = nil,
                 minIntervalMs: Double? = nil,
@@ -177,6 +179,7 @@ public struct NodeParams: Codable, Hashable {
         self.max = max
         self.stepNorm = stepNorm
         self.sensitivity = sensitivity
+        self.triggerMode = triggerMode
         self.threshold = threshold
         self.comparator = comparator
         self.minIntervalMs = minIntervalMs

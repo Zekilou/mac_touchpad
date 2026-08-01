@@ -103,7 +103,8 @@ public enum TimelineMigrator {
             type: .quantize,
             params: NodeParams(
                 stepNorm: gesture.stepNorm,
-                sensitivity: gesture.sensitivity
+                sensitivity: gesture.sensitivity,
+                triggerMode: gesture.triggerMode
             ),
             x: 400, y: 0, title: "量化"
         ))

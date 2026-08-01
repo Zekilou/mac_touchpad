@@ -604,7 +604,7 @@ public struct GestureConfig: ... {
 |------|------|--------|--------|------|
 | **M1：v2 线性管线落地** | 先把 MEMO 6 阶段线性管线写完 | Pipeline.swift + Config 迁移 + 引擎重写 + 卡片 UI | 中等（1-2天）| **✓ 已完成**（2026-08-01，swift build + 22 tests 通过）|
 | **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）| **✓ 已完成**（2026-08-01，52 tests 通过）|
-| **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）| 待办 |
+| **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）| **✓ 已完成**（2026-08-01，91 tests 通过）|
 | **M4-C：Graphaello 画布 UI** | Package.swift 加 Graphaello 依赖 → 工具箱面板 → 节点 Port 映射 → 画布拖放连线 → Inspector 弹层 | Views/TimelineCanvas/ + SPM 依赖更新 | 中等（1-2天）| 待办 |
 | **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 | 待办 |
 | **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 | 待办 |
@@ -629,6 +629,15 @@ public struct GestureConfig: ... {
 3. 新建 `Sources/GestureEngine/TimelineGraphValidator.swift`：Kahn 拓扑排序 dry-run 验证（.valid(order)/.cycle/.danglingEdge/.noEntry）+ reachableNodes 可达性
 4. 测试：TimelineTests（模型 Codable round-trip 11 个）+ TimelineMigratorTests（迁移器 9 个）+ TimelineGraphValidatorTests（拓扑验证 9 个）= 30 个新测试，总 52 tests 全通过
 5. 教训：测试中 `Predicate` 与 Foundation.Predicate(macOS 14+) 同名冲突，用 `import enum GestureEngine.Predicate` 显式导入消除；`GestureEngine.Predicate` 模块限定名不可用（GestureEngine 是类名优先解析）
+
+### M3 交付清单（已完成，2026-08-01）
+1. 新建 `Sources/GestureEngine/NodeValue.swift`：NodeValue（float/output(GestureOutput)/bool/unit）、StateStore（[String: NodeValue]）、FrameContext（rawSignals/now/directionRule/isAtBoundary）、TimelineEffects 协议（haptic/consume/HUD/mouse/freeze/notify 六种副作用）、NodeExecutionResult
+2. 新建 `Sources/GestureEngine/NodeExecutors.swift`：21 种节点执行逻辑（数据源/数学/量化/门控/分支/副作用/流控制全 switch 分发）+ PredicateEvaluator 递归求值
+3. 新建 `Sources/GestureEngine/GraphEvaluator.swift`：拓扑序执行器，branch 激活检查（true/false 端口匹配 branchResult）、端口值传递（nodeID → portName → value）、链断开传播（有入边无数据 → 跳过）
+4. 新建 `Sources/GestureEngine/TimelineRuntime.swift`：多 Timeline 运行时，按 TriggerEvent 路由，stateStore 跨 Timeline 共享（enter 的 startRaw 供 tick 用），reset() 清状态
+5. NodeParams 补 triggerMode 字段，迁移器 quantize 节点透传（修复 M2 遗漏：离散/连续模式信息丢失）
+6. 执行语义关键决策：branch 透传输入到 true/false 端口（下游从分支端口读数据）；副作用节点写 .unit 输出使后续节点可激活（consume→haptic(tick) 链路）；GraphEvaluator 跳过"有入边但无数据"的节点（quantize 无输出 → 整链冻结）
+7. 测试：NodeExecutorsTests（24）+ GraphEvaluatorTests（8）+ TimelineRuntimeTests（7）+ MockEffects（共享副作用 mock）= 39 个新测试，总 91 tests 全通过
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
