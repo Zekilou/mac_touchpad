@@ -605,7 +605,7 @@ public struct GestureConfig: ... {
 | **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）| **✓ 已完成**（2026-08-01，52 tests 通过）|
 | **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）| **✓ 已完成**（2026-08-01，91 tests 通过）|
 | **M4-C1：Timeline 数据层 UI** | 迁移预览（3 条图节点/边/端口列表）+ 节点属性面板 + 拓扑验证状态；Canvas 画布留待 M4-C2 | Views/Timeline/ + GestureTabView 卡片 | 小 | **✓ 已完成**（2026-08-01，91 tests 通过）|
-| **M4-C2：Canvas 画布** | SwiftUI Canvas 自绘：节点拖拽/端口连线/缩放平移/工具箱面板 | Views/TimelineCanvas/ | 大（2-3天）| 待办 |
+| **M4-C2：Canvas 画布** | SwiftUI Canvas 自绘：节点拖拽/端口连线/缩放平移/工具箱面板 | Views/TimelineCanvas/ | 大（2-3天）| **✓ 已完成**（2026-08-01，91 tests 通过）|
 | **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 | 待办 |
 | **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 | 待办 |
 
@@ -644,6 +644,14 @@ public struct GestureConfig: ... {
 2. 新建 `Sources/TouchpadGestures/Views/Timeline/TimelinePreviewView.swift`：迁移预览主视图（trigger Segmented 切换 3 条图、拓扑验证状态行 valid/cycle/danglingEdge/noEntry、节点列表可选中、边列表 from.port→to.port、选中节点属性面板）
 3. 改 `GestureTabView.swift`：「信号处理管线」卡片后新增「Timeline 图预览」卡片（v2 配置变化 → 图实时联动）
 4. 技术选型纠正：Graphaello 是 GraphQL codegen 工具（非节点图编辑器），改走 SwiftUI Canvas 自绘路线，拆 M4-C1（数据层）/M4-C2（画布交互）两轮
+
+### M4-C2 交付清单（已完成，2026-08-01）
+1. 新建 `Views/TimelineCanvas/TimelineNodeView.swift`：TimelineCanvasMetrics（节点 170×56 固定尺寸防抖动）、NodeConfig.canvasPoint/inputPortPoint/outputPortPoint（端口位置推导）、节点卡片视图（图标+标题+参数摘要+左右端口圆点，输出端口带 DragGesture 连线把手）
+2. 新建 `Views/TimelineCanvas/TimelineCanvasView.swift`：核心画布（节点 position 定位 + scaleEffect(topLeading)+offset 平移与 Canvas transformEffect 对齐；节点拖拽用 dragOrigin 防 translation 漂移；画布平移/MagnifyGesture 缩放（0.3~3.0）；贝塞尔连线 + 连线中虚线；输出→输入端口命中检测（24pt）建边防重；Delete 删除选中节点及其边）
+3. 新建 `Views/TimelineCanvas/NodePaletteView.swift`：右侧栏（缩放控制 +/-/适应画布、选中节点 Inspector + 入/出边删除、工具箱 21 种节点点击添加对角线排布）
+4. 改 `TimelinePreviewView.swift`：validationRow 加「画布编辑」按钮 → CanvasEditorSheet（画布+侧栏，编辑迁移图本地副本，M4-C2 阶段不持久化）
+5. 教训：`Edge` 与 SwiftUI.Edge 同名冲突 → `import struct GestureEngine.Edge` 消歧（同 Predicate 的 M2 方案）
+6. 待办：画布编辑的图接 GestureConfig.timelines 持久化 + 引擎切换（M7）；参数可编辑 Inspector（M4-C3）；节点右键菜单/端口类型校验
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)

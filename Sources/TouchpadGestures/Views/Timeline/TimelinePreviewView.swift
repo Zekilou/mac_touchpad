@@ -16,6 +16,12 @@ struct TimelinePreviewView: View {
 
     @State private var selectedTrigger: TriggerEvent = .onEnterHolding
     @State private var selectedNodeID: UUID?
+    /// 画布编辑器 sheet 状态
+    @State private var showCanvasEditor = false
+    @State private var editorTimeline = TimelineConfig(trigger: .onEnterHolding)
+    @State private var editorZoom: CGFloat = 1
+    @State private var editorPan: CGSize = .zero
+    @State private var editorSelected: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -42,6 +48,11 @@ struct TimelinePreviewView: View {
                 }
             }
         }
+        .sheet(isPresented: $showCanvasEditor) {
+            CanvasEditorSheet(timeline: $editorTimeline,
+                              zoom: $editorZoom, pan: $editorPan,
+                              selectedNodeID: $editorSelected)
+        }
     }
 
     // MARK: - 拓扑验证状态
@@ -65,6 +76,19 @@ struct TimelinePreviewView: View {
             }
             Text(L10n.tr("边 \(timeline.edges.count)", "\(timeline.edges.count) edges"))
                 .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            // 画布编辑入口
+            Button {
+                editorTimeline = timeline
+                editorZoom = 1
+                editorPan = .zero
+                editorSelected = nil
+                showCanvasEditor = true
+            } label: {
+                Label(L10n.tr("画布编辑", "Canvas Editor"), systemImage: "rectangle.inset.filled.and.cursorarrow")
+            }
+            .buttonStyle(.borderless)
+            .font(.caption)
         }
     }
 
@@ -152,5 +176,53 @@ struct TimelinePreviewView: View {
             if edge.to.nodeID == nodeID { result.insert(edge.to.portName) }
         }
         return result
+    }
+}
+
+// MARK: - 画布编辑器 sheet（M4-C2 Canvas 画布）
+
+/// 编辑器容器：画布 + 右侧栏，状态在此持有
+/// 编辑的是迁移图的本地副本（M4-C2 阶段不持久化，接入持久化见后续里程碑）
+private struct CanvasEditorSheet: View {
+    @Binding var timeline: TimelineConfig
+    @Binding var zoom: CGFloat
+    @Binding var pan: CGSize
+    @Binding var selectedNodeID: UUID?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(L10n.tr("Timeline 画布编辑器", "Timeline Canvas Editor"))
+                    .font(.headline)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .help(L10n.tr("关闭", "Close"))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            GeometryReader { geo in
+                HStack(spacing: 0) {
+                    TimelineCanvasView(timeline: $timeline,
+                                       zoom: $zoom,
+                                       pan: $pan,
+                                       selectedNodeID: $selectedNodeID)
+                    NodePaletteView(timeline: $timeline,
+                                    selectedNodeID: $selectedNodeID,
+                                    zoom: $zoom,
+                                    pan: $pan,
+                                    canvasSize: geo.size)
+                }
+            }
+        }
+        .frame(minWidth: 720, minHeight: 520)
     }
 }
