@@ -597,15 +597,15 @@ public struct GestureConfig: ... {
 
 ### 分阶段实现路线图
 
-节点画布 UI 技术选型：**路线 C（Graphaello 第三方库）**，放弃纯 SwiftUI Canvas 自绘。
-理由：Graphaello 是 SwiftUI 原生语法，开箱即用连线/端口/命中/缩放，半天集成节省 3-5 天手写 Canvas 成本。
+节点画布 UI 技术选型（**2026-08-01 纠正**）：~~路线 C（Graphaello 第三方库）~~ **不适用**——Graphaello 是 GraphQL 数据绑定 codegen 工具，与节点图编辑无关（选型时误判）。开源 SwiftUI 节点图编辑器库也不成熟（SwiftNodes=纯数据结构、Grape=仅图渲染、MetalGraph=闭源）。**改走路线 A：SwiftUI Canvas 自绘**（macOS 15 的 Canvas + DragGesture/MagnifyGesture 足以实现节点拖拽/连线/缩放）。M4-C 拆两轮：本轮=数据层 UI（节点列表/属性面板/迁移预览），下轮=Canvas 画布交互。
 
 | 阶段 | 目标 | 交付物 | 工作量 | 状态 |
 |------|------|--------|--------|------|
 | **M1：v2 线性管线落地** | 先把 MEMO 6 阶段线性管线写完 | Pipeline.swift + Config 迁移 + 引擎重写 + 卡片 UI | 中等（1-2天）| **✓ 已完成**（2026-08-01，swift build + 22 tests 通过）|
 | **M2：Timeline 数据模型** | 定义 TimelineConfig/NodeConfig/Edge/Predicate，写迁移器（v2 GestureConfig→3条Timeline图），含 dry-run 拓扑排序验证 | Models/Timeline.swift + 迁移测试 | 中等（1天）| **✓ 已完成**（2026-08-01，52 tests 通过）|
 | **M3：执行引擎** | TimelineRuntime + GraphEvaluator，纯计算/副作用隔离，先实现 M1 管线等价的 ~15 个核心节点 | TimelineRuntime.swift + 节点实现 + 单测 | 大（2-3天）| **✓ 已完成**（2026-08-01，91 tests 通过）|
-| **M4-C：Graphaello 画布 UI** | Package.swift 加 Graphaello 依赖 → 工具箱面板 → 节点 Port 映射 → 画布拖放连线 → Inspector 弹层 | Views/TimelineCanvas/ + SPM 依赖更新 | 中等（1-2天）| 待办 |
+| **M4-C1：Timeline 数据层 UI** | 迁移预览（3 条图节点/边/端口列表）+ 节点属性面板 + 拓扑验证状态；Canvas 画布留待 M4-C2 | Views/Timeline/ + GestureTabView 卡片 | 小 | **✓ 已完成**（2026-08-01，91 tests 通过）|
+| **M4-C2：Canvas 画布** | SwiftUI Canvas 自绘：节点拖拽/端口连线/缩放平移/工具箱面板 | Views/TimelineCanvas/ | 大（2-3天）| 待办 |
 | **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 | 待办 |
 | **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 | 待办 |
 
@@ -638,6 +638,12 @@ public struct GestureConfig: ... {
 5. NodeParams 补 triggerMode 字段，迁移器 quantize 节点透传（修复 M2 遗漏：离散/连续模式信息丢失）
 6. 执行语义关键决策：branch 透传输入到 true/false 端口（下游从分支端口读数据）；副作用节点写 .unit 输出使后续节点可激活（consume→haptic(tick) 链路）；GraphEvaluator 跳过"有入边但无数据"的节点（quantize 无输出 → 整链冻结）
 7. 测试：NodeExecutorsTests（24）+ GraphEvaluatorTests（8）+ TimelineRuntimeTests（7）+ MockEffects（共享副作用 mock）= 39 个新测试，总 91 tests 全通过
+
+### M4-C1 交付清单（已完成，2026-08-01）
+1. 新建 `Sources/TouchpadGestures/Views/Timeline/TimelineNodeInspector.swift`：NodeType→SF Symbol icon/配色映射（6 大类）、NodeConfig.paramsSummary 单行摘要、NodeParams.nonNilRows（Mirror 遍历非 nil 参数）、TimelineNodeInspector 只读属性面板（标题/参数/端口）
+2. 新建 `Sources/TouchpadGestures/Views/Timeline/TimelinePreviewView.swift`：迁移预览主视图（trigger Segmented 切换 3 条图、拓扑验证状态行 valid/cycle/danglingEdge/noEntry、节点列表可选中、边列表 from.port→to.port、选中节点属性面板）
+3. 改 `GestureTabView.swift`：「信号处理管线」卡片后新增「Timeline 图预览」卡片（v2 配置变化 → 图实时联动）
+4. 技术选型纠正：Graphaello 是 GraphQL codegen 工具（非节点图编辑器），改走 SwiftUI Canvas 自绘路线，拆 M4-C1（数据层）/M4-C2（画布交互）两轮
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)

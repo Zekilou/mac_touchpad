@@ -175,6 +175,14 @@ struct GestureTabView: View {
                         }
                     }
 
+                    // ---------- 新增：Timeline 图预览（迁移器生成，只读）----------
+                    Card(title: L10n.tr("Timeline 图预览", "Timeline Preview")) {
+                        TimelinePreviewView(
+                            gesture: config.gestures[idx],
+                            event: config.events.first { $0.id == config.gestures[idx].eventID }
+                        )
+                    }
+
                     // ---------- 重构：结构化触觉反馈（4 行）----------
                     Card(title: L10n.tr("触觉反馈", "Haptic Feedback")) {
                         HapticRow(
