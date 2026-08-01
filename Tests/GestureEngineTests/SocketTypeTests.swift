@@ -34,18 +34,36 @@ final class SocketTypeTests: XCTestCase {
         }
     }
 
-    /// 纯参数节点（region/event/group）无任何端口；recognizer 有脉冲输出、pipeOut 有 trigger 输入
+    /// 纯参数节点（event/group）无任何端口；recognizer 有脉冲输出、pipeOut 有 trigger 输入、region 输出区域数据
     func testParameterNodesHaveNoPorts() {
-        for type in [NodeType.region, .event, .group] {
+        for type in [NodeType.event, .group] {
             XCTAssertTrue(NodeTypeDef.inputSockets(of: type).isEmpty, "\(type) 不应有输入端口")
             XCTAssertTrue(NodeTypeDef.outputSockets(of: type).isEmpty, "\(type) 不应有输出端口")
         }
-        // recognizer：无输入，4 个时机脉冲输出
-        XCTAssertTrue(NodeTypeDef.inputSockets(of: .recognizer).isEmpty)
-        XCTAssertEqual(NodeTypeDef.outputSockets(of: .recognizer).map(\.type), [.unit, .unit, .unit, .unit])
+        // recognizer：fingers+region 输入，5 个输出（4 脉冲 + isHolding）
+        XCTAssertEqual(NodeTypeDef.inputSockets(of: .recognizer).map(\.type), [.fingers, .region])
+        XCTAssertEqual(NodeTypeDef.outputSockets(of: .recognizer).map(\.type),
+                       [.unit, .unit, .unit, .unit, .bool])
         // pipeOut：trigger 输入 → trigger 输出（透传）
         XCTAssertEqual(NodeTypeDef.inputSockets(of: .pipeOut), [SocketDef(name: "trigger", type: .unit)])
         XCTAssertEqual(NodeTypeDef.outputSockets(of: .pipeOut), [SocketDef(name: "trigger", type: .unit)])
+        // region：输出 region 数据（给识别器）
+        XCTAssertEqual(NodeTypeDef.outputSockets(of: .region), [SocketDef(name: "region", type: .region)])
+    }
+
+    /// 数据源纯输出：touchData 无输入，输出 6 信号 + fingers
+    func testTouchDataIsPureOutput() {
+        XCTAssertTrue(NodeTypeDef.inputSockets(of: .touchData).isEmpty, "触控板数据是数据源，不应有输入")
+        let outputs = NodeTypeDef.outputSockets(of: .touchData).map(\.name)
+        XCTAssertEqual(Set(outputs), Set(["normX", "normY", "size", "pressure", "velX", "velY", "fingers"]))
+    }
+
+    /// 变量操作节点：set(trigger+value → result)、toggle(trigger → result)
+    func testSetTogglePorts() {
+        XCTAssertEqual(NodeTypeDef.inputSockets(of: .set).map(\.type), [.unit, .generic])
+        XCTAssertEqual(NodeTypeDef.outputSockets(of: .set), [SocketDef(name: "result", type: .unit)])
+        XCTAssertEqual(NodeTypeDef.inputSockets(of: .toggle).map(\.type), [.unit])
+        XCTAssertEqual(NodeTypeDef.outputSockets(of: .toggle), [SocketDef(name: "result", type: .unit)])
     }
 
     /// 副作用节点输入为 unit 事件脉冲（haptic/mouse/freeze/notify）

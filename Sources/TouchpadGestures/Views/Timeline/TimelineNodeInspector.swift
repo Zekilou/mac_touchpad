@@ -24,6 +24,8 @@ extension NodeType {
         case .debounce:   return "timer"
         case .branch:     return "point.topleft.down.to.point.bottomright.curvepath"
         case .`switch`:   return "arrow.triangle.branch"
+        case .set:        return "pencil.and.outline"
+        case .toggle:     return "switch.2"
         case .consume:    return "speaker.wave.2"
         case .haptic:     return "iphone.radiowaves.left.and.right"
         case .hud:        return "rectangle.inset.filled.and.person.filled"
@@ -46,6 +48,7 @@ extension NodeType {
         case .transform, .scale, .clamp, .abs, .sign: return .purple
         case .quantize, .gate, .debounce:           return .orange
         case .branch, .`switch`:                    return .red
+        case .set, .toggle:                         return .indigo
         case .consume, .haptic, .hud, .mouse, .freeze, .notify: return .green
         case .split, .merge, .baseline, .state:     return .teal
         }

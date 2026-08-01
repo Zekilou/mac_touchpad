@@ -15,6 +15,8 @@ extension SocketType {
         case .output:  return .orange
         case .unit:    return .secondary
         case .generic: return .purple
+        case .fingers: return .teal
+        case .region:  return .green
         }
     }
 
@@ -27,6 +29,8 @@ extension SocketType {
         case .output:  return L10n.tr("量化输出", "Gesture Output")
         case .unit:    return L10n.tr("事件脉冲", "Event Pulse")
         case .generic: return L10n.tr("泛型", "Generic")
+        case .fingers: return L10n.tr("手指帧", "Fingers")
+        case .region:  return L10n.tr("区域", "Region")
         }
     }
 }
@@ -49,6 +53,16 @@ struct SocketShapeView: View {
                 Circle().strokeBorder(type.socketColor, lineWidth: 1.2)
             case .generic:
                 HexagonShape().fill(type.socketColor)
+            case .fingers:
+                // 多指：三个小圆点
+                HStack(spacing: 1.5) {
+                    Circle().fill(type.socketColor).frame(width: 3, height: 3)
+                    Circle().fill(type.socketColor).frame(width: 3, height: 3)
+                    Circle().fill(type.socketColor).frame(width: 3, height: 3)
+                }
+            case .region:
+                // 区域：小矩形
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous).fill(type.socketColor)
             }
         }
         .frame(width: 9, height: 9)

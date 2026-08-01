@@ -4,6 +4,7 @@ import Foundation
 
 /// 端口数据类型：连线两端必须类型匹配（generic 除外）
 /// UI 形状：float=圆 ● / int=方 ■ / bool=菱 ◆ / output=三角 ▲ / unit=空心 ○ / generic=星 ☆
+///         fingers=多指 〇〇 / region=矩形 ▭
 /// @ai: do not remove existing cases
 public enum SocketType: String, Codable, CaseIterable, Hashable {
     /// 标量信号（normY、变换结果）
@@ -18,6 +19,10 @@ public enum SocketType: String, Codable, CaseIterable, Hashable {
     case unit
     /// 泛型（路由器/分流等：与任何类型匹配，同组端口类型一致）
     case generic
+    /// 原始触摸帧数组（touchData.fingers → recognizer 输入）
+    case fingers
+    /// 触发区域数据（RegionRef 输出 → recognizer 输入）
+    case region
 }
 
 // MARK: - 端口声明
@@ -48,15 +53,19 @@ public enum NodeTypeDef {
         // 管道出口：接收识别器脉冲（trigger:unit）→ 透传启动下游
         case .pipeOut:
             return [SocketDef(name: "trigger", type: .unit)]
-        // 触控板数据源：可选 trigger 门控（tick 链经 pipeOut 门控，非 holding 时输出 invalid）
+        // 触控板数据源：纯输出，无输入（数据从原始帧注入节点内部读取）
         case .touchData:
-            return [SocketDef(name: "trigger", type: .unit, required: false)]
-        // 无输入：数据源 / 参数承载 / 视觉
-        case .value, .region, .event, .group:
             return []
-        // 识别器：无连线输入（原始帧经 FrameContext 隐式注入）
+        // 无输入：常量 / 参数承载 / 视觉
+        case .value, .event, .group:
+            return []
+        // 区域引用：无输入（区域数据从 FrameContext 读取，卡片内 regionID 关联）
+        case .region:
+            return []
+        // 识别器：数据流输入全显式（fingers 原始帧 + region 触发区域）
         case .recognizer:
-            return []
+            return [SocketDef(name: "fingers", type: .fingers),
+                    SocketDef(name: "region", type: .region)]
         // 数学/变换：单 float 输入
         case .transform, .scale, .clamp, .abs, .sign:
             return [SocketDef(name: "value", type: .float)]
@@ -74,6 +83,12 @@ public enum NodeTypeDef {
         case .`switch`:
             return [SocketDef(name: "index", type: .int),
                     SocketDef(name: "value", type: .generic)]
+        // 变量操作：trigger 脉冲驱动，value 是要写入变量的数据
+        case .set:
+            return [SocketDef(name: "trigger", type: .unit),
+                    SocketDef(name: "value", type: .generic)]
+        case .toggle:
+            return [SocketDef(name: "trigger", type: .unit)]
         // 副作用
         case .consume:
             return [SocketDef(name: "data", type: .output)]
@@ -99,24 +114,29 @@ public enum NodeTypeDef {
         switch type {
         case .pipeOut:
             return [SocketDef(name: "trigger", type: .unit)]
-        /// 识别器：时机脉冲输出（unit，时机切换那帧有效）
+        /// 识别器：时机脉冲输出（unit，时机切换那帧有效）+ isHolding（bool，每帧）
         case .recognizer:
             return [SocketDef(name: "firstTap", type: .unit),
                     SocketDef(name: "enterHolding", type: .unit),
                     SocketDef(name: "tick", type: .unit),
-                    SocketDef(name: "exitHolding", type: .unit)]
-        /// 唯一数据源：触控板多变量输出（连线端口名 = SignalSource.rawValue）
+                    SocketDef(name: "exitHolding", type: .unit),
+                    SocketDef(name: "isHolding", type: .bool)]
+        /// 唯一数据源：触控板多变量输出 + 原始帧（fingers 给识别器）
         case .touchData:
             return [SocketDef(name: "normX", type: .float),
                     SocketDef(name: "normY", type: .float),
                     SocketDef(name: "size", type: .float),
                     SocketDef(name: "pressure", type: .float),
                     SocketDef(name: "velX", type: .float),
-                    SocketDef(name: "velY", type: .float)]
+                    SocketDef(name: "velY", type: .float),
+                    SocketDef(name: "fingers", type: .fingers)]
         case .value:
             return [SocketDef(name: "value", type: .float)]
+        // 区域引用：输出 region 数据（给识别器）
+        case .region:
+            return [SocketDef(name: "region", type: .region)]
         // 无输出：参数承载 / 视觉
-        case .region, .event, .group:
+        case .event, .group:
             return []
         // 数学/变换
         case .transform, .scale, .clamp, .abs, .sign:
@@ -132,6 +152,9 @@ public enum NodeTypeDef {
                     SocketDef(name: "out2", type: .generic)]
         case .`switch`:
             return [SocketDef(name: "result", type: .generic)]
+        // 变量操作：执行后输出 unit（事件脉冲，供后续节点串联）
+        case .set, .toggle:
+            return [SocketDef(name: "result", type: .unit)]
         // 副作用：执行完输出 unit（事件脉冲，供后续节点串联）
         case .consume, .haptic, .hud, .mouse, .freeze, .notify:
             return [SocketDef(name: "result", type: .unit)]

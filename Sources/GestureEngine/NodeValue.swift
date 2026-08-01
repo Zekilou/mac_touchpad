@@ -5,11 +5,16 @@ import mt_bridge
 
 /// 节点输出端口的统一值类型
 /// 纯计算链传 .float；量化节点传 .output(GestureOutput)；分支/gate 传 .bool；副作用节点传 .unit
+/// 数据流传 .fingers（原始触摸帧）/ .region（触发区域）
 public enum NodeValue: Equatable {
     case float(Float)
     case output(GestureOutput)
     case bool(Bool)
     case unit
+    /// 原始触摸帧数组（touchData.fingers 输出 → recognizer 输入）
+    case fingers([mt_touch_t])
+    /// 触发区域数据（RegionRef 输出 → recognizer 输入）
+    case region(RegionConfig)
 
     public var floatValue: Float? {
         if case .float(let v) = self { return v }
@@ -22,6 +27,31 @@ public enum NodeValue: Equatable {
     public var boolValue: Bool? {
         if case .bool(let v) = self { return v }
         return nil
+    }
+    public var fingersValue: [mt_touch_t]? {
+        if case .fingers(let v) = self { return v }
+        return nil
+    }
+    public var regionValue: RegionConfig? {
+        if case .region(let v) = self { return v }
+        return nil
+    }
+}
+
+// MARK: - mt_touch_t Equatable（fingers 值需要）
+
+extension mt_touch_t: Equatable {
+    public static func == (lhs: mt_touch_t, rhs: mt_touch_t) -> Bool {
+        lhs.frame == rhs.frame && lhs.timestamp == rhs.timestamp
+            && lhs.pathIndex == rhs.pathIndex && lhs.state == rhs.state
+            && lhs.fingerID == rhs.fingerID && lhs.handID == rhs.handID
+            && lhs.norm_x == rhs.norm_x && lhs.norm_y == rhs.norm_y
+            && lhs.vel_x == rhs.vel_x && lhs.vel_y == rhs.vel_y
+            && lhs.size == rhs.size && lhs.pressure == rhs.pressure
+            && lhs.angle == rhs.angle && lhs.majorAxis == rhs.majorAxis
+            && lhs.minorAxis == rhs.minorAxis && lhs.density == rhs.density
+            && lhs.abs_x == rhs.abs_x && lhs.abs_vel_x == rhs.abs_vel_x
+            && lhs.abs_vel_y == rhs.abs_vel_y && lhs.zPressure == rhs.zPressure
     }
 }
 
@@ -53,6 +83,10 @@ public struct SocketValue: Equatable {
     public static func bool(_ v: Bool) -> SocketValue { SocketValue(valid: true, value: .bool(v)) }
     /// 便捷：有效量化输出
     public static func output(_ v: GestureOutput) -> SocketValue { SocketValue(valid: true, value: .output(v)) }
+    /// 便捷：有效原始触摸帧
+    public static func fingers(_ v: [mt_touch_t]) -> SocketValue { SocketValue(valid: true, value: .fingers(v)) }
+    /// 便捷：有效触发区域
+    public static func region(_ v: RegionConfig) -> SocketValue { SocketValue(valid: true, value: .region(v)) }
 
     // MARK: - 值透传（读 value 内层）
 
@@ -79,31 +113,23 @@ public struct FrameContext {
     public var directionRule: DirectionRule
     /// 当前事件值是否在边界（branch 的 atBoundary/notAtBoundary 用，由外部注入）
     public var isAtBoundary: Bool
-    /// 原始触摸帧（识别器节点用：轻点/双击/保持时序识别）
+    /// 原始触摸帧（touchData 数据源节点用：输出 fingers + 各信号）
     public var touches: [mt_touch_t]
-    /// 手势绑定区域（识别器判断边缘接触）
+    /// 手势绑定区域（RegionRef 节点输出用；数据流端口，非识别器隐式注入）
     public var region: RegionConfig?
-    /// 接触面积过滤范围（防手掌误触发）
-    public var sizeRange: ClosedRange<Float>
-    /// 引擎侧冻结请求（freeze 节点置位，识别器读入 frozen 状态）
-    public var freezeRequested: Bool
 
     public init(rawSignals: [SignalSource: Float] = [:],
                 now: Double = 0,
                 directionRule: DirectionRule = .positiveDecrease,
                 isAtBoundary: Bool = false,
                 touches: [mt_touch_t] = [],
-                region: RegionConfig? = nil,
-                sizeRange: ClosedRange<Float> = 0.1...1.0,
-                freezeRequested: Bool = false) {
+                region: RegionConfig? = nil) {
         self.rawSignals = rawSignals
         self.now = now
         self.directionRule = directionRule
         self.isAtBoundary = isAtBoundary
         self.touches = touches
         self.region = region
-        self.sizeRange = sizeRange
-        self.freezeRequested = freezeRequested
     }
 }
 

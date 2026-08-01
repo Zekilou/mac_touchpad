@@ -14,7 +14,7 @@ final class TimelineMigratorTests: XCTestCase {
                     step: 0.0125, boundaryThreshold: 0.001)
     }
 
-    // MARK: - 总体结构（单图 + recognizer 根 + 4 个管道出口）
+    // MARK: - 总体结构（单图 + touchData 数据源 + recognizer + 4 个管道出口）
 
     func testMigrate_ProducesSingleGraphWithFourPipeOuts() {
         let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
@@ -24,8 +24,9 @@ final class TimelineMigratorTests: XCTestCase {
             .compactMap { $0.params.trigger }
         XCTAssertEqual(Set(pipes),
                        Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
-        // recognizer 根节点存在
+        // recognizer 根节点存在 + touchData 数据源存在
         XCTAssertNotNil(graph.firstNode(of: .recognizer))
+        XCTAssertNotNil(graph.firstNode(of: .touchData))
         // 拓扑验证通过
         switch TimelineGraphValidator.topologicalOrder(of: graph) {
         case .valid(let order):
@@ -33,6 +34,24 @@ final class TimelineMigratorTests: XCTestCase {
         case let result:
             XCTFail("拓扑验证失败: \(result)")
         }
+    }
+
+    func testMigrate_DataFlowExplicit() {
+        let region = UUID()
+        let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent(),
+                                             regionID: region)
+        let recognizer = graph.firstNode(of: .recognizer)!
+        let touchData = graph.firstNode(of: .touchData)!
+        let regionRef = graph.firstNode(of: .region)!
+        // 显式数据流：touchData.fingers → recognizer.fingers；regionRef.region → recognizer.region
+        XCTAssertTrue(graph.edges.contains {
+            $0.from == PortID(nodeID: touchData.id, portName: "fingers")
+                && $0.to == PortID(nodeID: recognizer.id, portName: "fingers")
+        })
+        XCTAssertTrue(graph.edges.contains {
+            $0.from == PortID(nodeID: regionRef.id, portName: "region")
+                && $0.to == PortID(nodeID: recognizer.id, portName: "region")
+        })
     }
 
     func testMigrate_RecognizerPulseConnectsToPipeOuts() {
@@ -54,7 +73,7 @@ final class TimelineMigratorTests: XCTestCase {
         }
     }
 
-    // MARK: - recognizer（识别参数在根节点）
+    // MARK: - recognizer（识别参数在节点卡片内）
 
     func testRecognizerNode_CarriesTapParamsAndSignalSource() {
         var pipeline = makePipeline()
@@ -99,18 +118,20 @@ final class TimelineMigratorTests: XCTestCase {
         XCTAssertEqual(baseline?.params.source, .normY)
     }
 
-    func testEnterBlock_MouseAndHapticFollowConfig() {
-        // 默认：lockPosition mouse + enter haptic
+    func testEnterBlock_SetCursorLockedAndHapticFollowConfig() {
+        // 默认：set(cursorLocked) 变量操作 + enter haptic（替代 mouse 专有卡片）
         let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
-        XCTAssertEqual(t1.firstNode(of: .mouse)?.params.mouseMode, .lockPosition)
+        let setLock = t1.nodes.first { $0.type == .set && $0.params.key == "cursorLocked" }
+        XCTAssertNotNil(setLock)
+        XCTAssertNil(t1.firstNode(of: .mouse), "mouse 专有卡片已废弃")
         XCTAssertEqual(t1.firstNode(of: .haptic)?.params.waveform, HapticEvent.enter.waveform)
 
-        // 关闭：无 mouse（enter/exit 都无）
+        // 关闭：无 set(cursorLocked)（enter/exit 都无）
         var pipeline = makePipeline()
         pipeline.disassociateMouse = false
         pipeline.hapticEnter = HapticEvent(enabled: false, waveform: 2, count: 1, intervalUs: 0)
         let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())
-        XCTAssertNil(t2.firstNode(of: .mouse))
+        XCTAssertNil(t2.nodes.first { $0.type == .set && $0.params.key == "cursorLocked" })
         // 剩余 haptic = tick 震动 + 边界震动
         XCTAssertEqual(t2.nodes.filter { $0.type == .haptic }.count, 2)
     }
@@ -123,15 +144,17 @@ final class TimelineMigratorTests: XCTestCase {
         let touchData = graph.firstNode(of: .touchData)
         let transform = graph.firstNode(of: .transform)
         let quantize = graph.firstNode(of: .quantize)
-        let branch = graph.firstNode(of: .branch)
+        // isHolding 门控 branch（predicate .positive）与边界 branch（.notAtBoundary）是两个节点
+        let gate = graph.nodes.first { $0.type == .branch && $0.params.predicate == .positive }!
+        let boundaryBranch = graph.nodes.first { $0.type == .branch && $0.params.predicate == .notAtBoundary }!
         let consume = graph.firstNode(of: .consume)
-        let freeze = graph.firstNode(of: .freeze)
+        let setFrozen = graph.nodes.first { $0.type == .set && $0.params.key == "frozen" }
         XCTAssertNotNil(touchData)
         XCTAssertNotNil(transform)
         XCTAssertNotNil(quantize)
-        XCTAssertNotNil(branch)
         XCTAssertNotNil(consume)
-        XCTAssertNotNil(freeze)
+        XCTAssertNotNil(setFrozen)
+        XCTAssertNil(graph.firstNode(of: .freeze), "freeze 专有卡片已废弃")
 
         // 参数透传
         XCTAssertEqual(transform?.params.transform, .delta)
@@ -141,33 +164,30 @@ final class TimelineMigratorTests: XCTestCase {
         XCTAssertEqual(consume?.params.method, .mediaKey)
         XCTAssertEqual(consume?.params.step, 0.0125)
 
-        // 边：pipeOut(onTick).trigger → touchData（门控）→ transform → quantize → branch；out1→consume；out2→freeze
-        let tickPipe = graph.nodes.first { $0.type == .pipeOut && $0.params.trigger == .onTick }!
+        // isHolding 门控：recognizer.isHolding → gate.cond；touchData.normY → gate.value
+        let recognizer = graph.firstNode(of: .recognizer)!
         XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: tickPipe.id, portName: "trigger")
-                && $0.to == PortID(nodeID: touchData!.id, portName: "trigger")
+            $0.from == PortID(nodeID: recognizer.id, portName: "isHolding")
+                && $0.to == PortID(nodeID: gate.id, portName: "cond")
         })
-        func connected(_ from: NodeConfig?, _ to: NodeConfig?, port: String) -> Bool {
+        XCTAssertTrue(graph.edges.contains {
+            $0.from == PortID(nodeID: touchData!.id, portName: "normY")
+                && $0.to == PortID(nodeID: gate.id, portName: "value")
+        })
+
+        // 边：gate.out1 → transform → quantize → boundaryBranch；out1→consume；out2→set(frozen)
+        func connected(_ from: NodeConfig?, _ to: NodeConfig?, port: String, toPort: String = "value") -> Bool {
             guard let from, let to else { return false }
             return graph.edges.contains {
                 $0.from == PortID(nodeID: from.id, portName: port)
-                    && $0.to == PortID(nodeID: to.id, portName: "value")
+                    && $0.to == PortID(nodeID: to.id, portName: toPort)
             }
         }
-        XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: touchData!.id, portName: "normY")
-                && $0.to == PortID(nodeID: transform!.id, portName: "value")
-        })
+        XCTAssertTrue(connected(gate, transform, port: "out1"))
         XCTAssertTrue(connected(transform, quantize, port: "result"))
-        XCTAssertTrue(connected(quantize, branch, port: "tick"))
-        XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: branch!.id, portName: "out1")
-                && $0.to == PortID(nodeID: consume!.id, portName: "data")
-        })
-        XCTAssertTrue(graph.edges.contains {
-            $0.from == PortID(nodeID: branch!.id, portName: "out2")
-                && $0.to == PortID(nodeID: freeze!.id, portName: "trigger")
-        })
+        XCTAssertTrue(connected(quantize, boundaryBranch, port: "tick"))
+        XCTAssertTrue(connected(boundaryBranch, consume, port: "out1", toPort: "data"))
+        XCTAssertTrue(connected(boundaryBranch, setFrozen, port: "out2", toPort: "trigger"))
     }
 
     func testTickBlock_HapticFollowsEnabled() {
@@ -184,12 +204,12 @@ final class TimelineMigratorTests: XCTestCase {
 
     // MARK: - onExitHolding
 
-    func testExitBlock_UnlocksMouse() {
+    func testExitBlock_SetCursorLockedZero() {
         let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
-        // 图上第一个 mouse 是 enter 的 lock；exit 的 unlock 节点存在
-        XCTAssertNotNil(t1.nodes.first {
-            $0.type == .mouse && $0.params.mouseMode == .unlockPosition
-        })
+        // exit 链：set(cursorLocked=0) 解除锁定（替代 unlockPosition mouse）
+        let setLock = t1.nodes.first { $0.type == .set && $0.params.key == "cursorLocked" }
+        XCTAssertNotNil(setLock)
+        XCTAssertNil(t1.firstNode(of: .mouse))
     }
 
     func testExitBlock_HapticExitDefaultsDisabled() {

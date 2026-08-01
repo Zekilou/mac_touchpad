@@ -224,11 +224,13 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
 
     // MARK: - 信号源/步长（引擎从单图读取）
 
-    /// onTick 链的信号源（touchData → transform 的连线端口名 = SignalSource）
+    /// onTick 链的信号源（touchData 出边中第一个 SignalSource 字段端口）
     public var tickSignalSource: SignalSource {
         guard let td = timeline.firstNode(of: .touchData) else { return .normY }
-        guard let port = timeline.outgoingEdges(from: td.id).first?.from.portName else { return .normY }
-        return SignalSource(rawValue: port) ?? .normY
+        for edge in timeline.outgoingEdges(from: td.id) {
+            if let src = SignalSource(rawValue: edge.from.portName) { return src }
+        }
+        return .normY
     }
 
     /// onTick 链的量化步长（图中唯一 quantize 节点）

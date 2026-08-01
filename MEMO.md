@@ -738,6 +738,21 @@ public struct GestureConfig: ... {
 - **用户决定：多层画布/子图（系统算法内部也用节点配置、可点进去改）先搁置**，NodeConfig.subgraph 字段已预留，后续需要再做
 - **P6 迁移器修复（2026-08-02）**：region/event refs 只在顶层添加一次（原 buildRecognizeBlock 重复添加导致 onFirstTap 管道出口连 refs）；onFirstTap 块置空（识别在 recognizer 根完成）；用户旧 v5 配置已删除，手写新 P6 结构 config.json（19 节点/16 边 × 2 手势，拓扑有效，refs 纯参数无连线）
 
+## v7 全显式数据流 + 变量化（2026-08-02 起）
+用户确认的架构原则：
+1. **封装算法复杂度，暴露接口**：识别器内部有循环/时序状态机，保持黑盒不拆成节点图；但边界全暴露——输入（fingers/region/参数）、输出（时机脉冲/isHolding）都是显式端口，不隐式注入
+2. **数据流显式**：touchData 是唯一数据源（纯输出，无输入——撤销 P6 的 trigger 门控），输出 6 信号 + fingers 原始帧；RegionRef 输出 region 数据；识别器从数据流端口取数
+3. **外部交互变量化**：所有与系统/外部环境交互的状态都是 StateNode 变量 + 通用 set/toggle 操作节点，不做专有行为卡片——cursorLocked（enter set=1 / exit set=0）、frozen（边界 set=1 / 反向滑动 set=0）；引擎每帧读 stateStore 决定 warp/冻结
+4. **固定枚举算法留卡片内**：加减乘除/delta-absolute/discrete-continuous 这类固定算法选择做成卡片内下拉菜单（NodeParams 枚举），不用输入线传
+5. **isHolding 门控**：识别器输出 isHolding(bool)，tick 链用 branch.cond 门控（非 holding 时数据链冻结）
+- NodeValue 新增 .fingers([mt_touch_t]) / .region(RegionConfig) + mt_touch_t Equatable；SocketType 新增 fingers(多指●)/region(矩形▭) 类型
+- NodeType 新增 set(trigger+value→写 state[key]) / toggle(trigger→取反 state[key])；删 mouse/freeze 卡片（工具箱隐藏，NodeType case 保留兼容旧配置 decode）
+- NodeParams 新增 touchSizeMin/touchSizeMax（recognizer 尺寸过滤卡片参数，替代全局注入）
+- FrameContext 删除 sizeRange/freezeRequested（改卡片参数 + frozen 变量）
+- 迁移器：touchData.fingers→recognizer.fingers、RegionRef.region→recognizer.region 显式连线；enter 链 set(cursorLocked) 替代 mouse；tick 链 isHolding→gate→transform→quantize→branch→consume + set(frozen)；exit 链 set(cursorLocked=0)
+- 引擎：鼠标锁定改读 runtimes store["cursorLocked"] 驱动 warp；frozen 由识别器读 state 变量
+- 113 tests 通过（新增 set/toggle 执行器测试、touchData 纯输出端口测试、显式数据流迁移测试）
+
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
 - 状态机从 leftState/rightState 改为 `[UUID: GestureState]` 字典，每帧遍历所有手势

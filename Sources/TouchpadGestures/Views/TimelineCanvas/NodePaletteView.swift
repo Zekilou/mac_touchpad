@@ -59,7 +59,8 @@ struct NodePaletteView: View {
             if isPaletteExpanded {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(NodeType.allCases, id: \.self) { type in
+                        // 专有行为卡片已废弃（mouse/freeze 改由 set/toggle 变量操作表达），工具箱隐藏
+                        ForEach(NodeType.allCases.filter { $0 != .mouse && $0 != .freeze }, id: \.self) { type in
                             Button {
                                 addNode(type)
                             } label: {

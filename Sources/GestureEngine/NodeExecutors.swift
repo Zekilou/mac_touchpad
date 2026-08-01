@@ -32,28 +32,32 @@ public enum NodeExecutors {
             return output(node, .unit())
 
         // MARK: 识别器（系统算法封装：轻点/双击/保持时序识别，内部跨帧状态机）
+        // 输入全显式（fingers + region），输出时机脉冲 + isHolding 状态
 
         case .recognizer:
-            return runRecognizer(node, frame: frame, state: &state, effects: effects)
+            return runRecognizer(node, inputs: inputs, frame: frame,
+                                 state: &state, effects: effects)
 
         // MARK: 数据源
 
-        /// 唯一数据源：触控板多变量输出（端口名 = SignalSource.rawValue）
-        /// 可选 trigger 门控：连了 trigger 且无效（非 holding）→ 输出全 invalid（tick 链冻结）
+        /// 唯一数据源：触控板多变量输出 + 原始帧 fingers（给识别器）
+        /// 纯输出无输入——数据从 FrameContext.rawSignals/touches 读取
         case .touchData:
-            if let trig = inputs["trigger"] {
-                guard trig.valid else { return invalidOutputs(node) }
-            }
             var outputs: [String: SocketValue] = [:]
             for s in SignalSource.allCases {
                 outputs[s.rawValue] = .float(frame.rawSignals[s] ?? 0)
             }
+            outputs["fingers"] = .fingers(frame.touches)
             return NodeExecutionResult(outputs: outputs)
         case .value:
             return output(node, .float(p.constant ?? 0))
 
-        // 绑定引用：纯参数承载（无执行逻辑）
-        case .region, .event:
+        // 区域引用：输出 region 数据（给识别器；数据从 FrameContext 注入，卡片内 regionID 关联）
+        case .region:
+            guard let region = frame.region else { return invalidOutputs(node) }
+            return output(node, .region(region))
+        // 事件引用：纯参数承载（无执行逻辑）
+        case .event:
             return .init()
 
         // 批注组：纯结构节点（无执行逻辑）
@@ -170,6 +174,22 @@ public enum NodeExecutors {
             effects.notify(label: p.label ?? "")
             return output(node, .unit())
 
+        // MARK: 变量操作（外部状态变量 + 通用操作，替代专有行为卡片）
+
+        /// set：trigger 脉冲时把 value 写入 state[key]（如 cursorLocked=1）
+        case .set:
+            guard required(inputs, "trigger") != nil,
+                  let v = required(inputs, "value") else { return invalidOutputs(node) }
+            state[p.key ?? "var"] = v.value
+            return output(node, .unit())
+        /// toggle：trigger 脉冲时对 state[key] 取反（bool）
+        case .toggle:
+            guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
+            let key = p.key ?? "var"
+            let current = state[key]?.boolValue ?? false
+            state[key] = .bool(!current)
+            return output(node, .unit())
+
         // MARK: 流控制
 
         case .split:
@@ -237,22 +257,29 @@ public enum NodeExecutors {
     /// 识别器状态（跨帧私有变量；每手势一个识别器节点，id 唯一）
     private static var recognizerStates: [UUID: RecognizerState] = [:]
 
-    /// 识别器执行：读 FrameContext 原始帧 → 内部状态机 → 输出时机脉冲（unit，切换帧有效）
-    private static func runRecognizer(_ node: NodeConfig, frame: FrameContext,
+    /// 识别器执行：读显式输入（fingers 原始帧 + region）→ 内部状态机 → 输出时机脉冲 + isHolding
+    /// 算法参数（tapMax*/holdMinDuration/source/stepNorm/touchSize*）全部在卡片内配置
+    private static func runRecognizer(_ node: NodeConfig, inputs: [String: SocketValue],
+                                      frame: FrameContext,
                                       state: inout StateStore,
                                       effects: TimelineEffects) -> NodeExecutionResult {
         var st = recognizerStates[node.id] ?? RecognizerState()
         defer { recognizerStates[node.id] = st }
 
         let p = node.params
-        let sizeRange = frame.sizeRange
-        func isSizeValid(_ t: mt_touch_t) -> Bool { sizeRange.contains(t.size) }
-        func inRegion(_ t: mt_touch_t) -> Bool { frame.region?.contains(x: t.norm_x, y: t.norm_y) ?? true }
-        let edgeFinger: mt_touch_t? = frame.touches.first {
+        // 显式输入：手指原始帧 + 触发区域（数据流端口，非隐式注入）
+        let touches = inputs["fingers"]?.value.fingersValue ?? []
+        let region = inputs["region"]?.value.regionValue
+        // 卡片内参数：尺寸过滤（防手掌）
+        let sizeMin = p.touchSizeMin ?? 0.1
+        let sizeMax = p.touchSizeMax ?? 1.0
+        func isSizeValid(_ t: mt_touch_t) -> Bool { t.size >= sizeMin && t.size <= sizeMax }
+        func inRegion(_ t: mt_touch_t) -> Bool { region?.contains(x: t.norm_x, y: t.norm_y) ?? true }
+        let edgeFinger: mt_touch_t? = touches.first {
             inRegion($0) && $0.state != 0 && $0.state != 7 && isSizeValid($0)
         }
         func fingerStillThere(_ pathIdx: Int32) -> Bool {
-            frame.touches.contains { $0.pathIndex == pathIdx && $0.state != 0 && $0.state != 7 && isSizeValid($0) }
+            touches.contains { $0.pathIndex == pathIdx && $0.state != 0 && $0.state != 7 && isSizeValid($0) }
         }
 
         let source = p.source ?? .normY
@@ -262,10 +289,11 @@ public enum NodeExecutors {
         let tapMaxGap = p.tapMaxGap ?? 0.30
         let holdMinDuration = p.holdMinDuration ?? 0.20
 
-        // 输出端口：默认全 invalid，时机切换帧置有效
+        // 输出端口：时机脉冲默认 invalid；isHolding 每帧输出当前状态
         var out: [String: SocketValue] = [
             "firstTap": .invalid(), "enterHolding": .invalid(),
             "tick": .invalid(), "exitHolding": .invalid(),
+            "isHolding": .bool(st.phase == .holding),
         ]
 
         func drift(_ f: mt_touch_t, _ pos: (Float, Float)) -> Float {
@@ -323,6 +351,7 @@ public enum NodeExecutors {
                                          startTime: frame.now, startPos: (f.norm_x, f.norm_y),
                                          startRaw: raw, lastTriggerVal: raw)
                     out["enterHolding"] = .unit()
+                    out["isHolding"] = .bool(true)
                     effects.recognizerState(holding: true)
                 }
             }
@@ -330,6 +359,7 @@ public enum NodeExecutors {
         case .holding:
             if !fingerStillThere(st.pathIndex) {
                 out["exitHolding"] = .unit()
+                out["isHolding"] = .bool(false)
                 effects.recognizerState(holding: false)
                 st = RecognizerState(phase: .idle)
             } else if st.frozen {
@@ -340,11 +370,12 @@ public enum NodeExecutors {
                 if abs(delta) >= 0.5 * stepNorm, (delta >= 0) != (st.freezeDir >= 0) {
                     st.frozen = false
                     st.lastTriggerVal = raw
+                    state["frozen"] = .bool(false)   // 解冻：写回变量
                 }
             } else if let f = edgeFinger, f.pathIndex == st.pathIndex {
                 let raw = source.extract(from: f)
-                if frame.freezeRequested {
-                    // 冻结请求（freeze 节点已执行）→ 进入冻结
+                if state["frozen"]?.boolValue == true {
+                    // 冻结变量已置位（边界链 set(frozen=1)）→ 进入冻结
                     st.frozen = true
                     st.freezeDir = raw >= st.lastTriggerVal ? 1 : -1
                 } else {

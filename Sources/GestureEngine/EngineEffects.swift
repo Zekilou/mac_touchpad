@@ -30,7 +30,8 @@ final class EngineEffects: TimelineEffects {
     func lockMouse() { engine?.disassociateMouse() }
     func unlockMouse() { engine?.associateMouse() }
 
-    func freeze() { engine?.requestFreeze() }
+    /// 旧 freeze 卡片兼容（已废弃）：冻结现在通过 set(frozen=1) 变量操作表达
+    func freeze() {}
 
     func notify(label: String) {
         // 预留：UI 通知（M6 调试工具使用）

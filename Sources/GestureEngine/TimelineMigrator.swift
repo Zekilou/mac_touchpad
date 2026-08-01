@@ -54,11 +54,14 @@ public struct LegacyPipelineConfig {
 
 // MARK: - 迁移器
 
-/// v2 线性管线 → 单张自由节点图迁移器（v6 识别器节点化）
+/// v2 线性管线 → 单张自由节点图迁移器（v7 全显式数据流）
 ///
 /// 一张图，含：
-/// - 1 个 recognizer 根节点（系统算法封装：轻点/双击/保持识别状态机，无输入，输出时机脉冲）
-/// - 4 个 pipeOut 管道出口节点（每个 TriggerEvent 一个链入口，收到识别器脉冲 → 透传启动下游）
+/// - touchData 唯一数据源（纯输出：各信号 + fingers 原始帧）
+/// - RegionRef 输出 region 数据
+/// - recognizer 黑盒算法（显式输入 fingers+region，输出时机脉冲 + isHolding）
+/// - 4 个 pipeOut 管道出口（每个 TriggerEvent 一个链入口）
+/// - 外部状态用 StateNode 变量 + set/toggle 操作节点（cursorLocked/frozen）
 /// 各阶段原逻辑垂直堆叠，挂在对应 pipeOut 之后。用户可在图上自由连线扩展。
 public enum TimelineMigrator {
 
@@ -74,8 +77,21 @@ public enum TimelineMigrator {
         var edges: [Edge] = []
         var entries: [UUID] = []
 
-        // 1. recognizer 根节点：内部跨帧状态机（轻点/双击/保持识别）
-        //    无输入端口——每帧从 FrameContext.touches 读原始触摸帧，输出时机脉冲
+        // 1. touchData 唯一数据源（纯输出：信号 + fingers 原始帧给识别器）
+        let touchData = NodeConfig(type: .touchData, x: -480, y: 20, title: "触控板数据")
+        nodes.append(touchData)
+
+        // 2. RegionRef：输出 region 数据（给识别器；boundRegionID 从图上读取）
+        if let regionID {
+            nodes.append(NodeConfig(type: .region, params: NodeParams(regionID: regionID),
+                                    x: -320, y: -80, title: "触发区域"))
+        }
+        if let eventID {
+            nodes.append(NodeConfig(type: .event, params: NodeParams(eventID: eventID),
+                                    x: -160, y: -80, title: "绑定事件"))
+        }
+
+        // 3. recognizer 黑盒算法：显式输入 fingers + region
         let recognizer = NodeConfig(
             type: .recognizer,
             params: NodeParams(
@@ -90,19 +106,15 @@ public enum TimelineMigrator {
         )
         nodes.append(recognizer)
         entries.append(recognizer.id)
-
-        // 2. 绑定引用（参数承载，无执行逻辑；boundRegionID/boundEventID 从图上读取）
-        if let regionID {
-            nodes.append(NodeConfig(type: .region, params: NodeParams(regionID: regionID),
-                                    x: -320, y: -80, title: "触发区域"))
-        }
-        if let eventID {
-            nodes.append(NodeConfig(type: .event, params: NodeParams(eventID: eventID),
-                                    x: -160, y: -80, title: "绑定事件"))
+        // 数据流连线：touchData.fingers → recognizer.fingers；RegionRef.region → recognizer.region
+        edges.append(Edge(from: PortID(nodeID: touchData.id, portName: "fingers"),
+                          to: PortID(nodeID: recognizer.id, portName: "fingers")))
+        if let regionID, let regionRef = nodes.first(where: { $0.type == .region }) {
+            edges.append(Edge(from: PortID(nodeID: regionRef.id, portName: "region"),
+                              to: PortID(nodeID: recognizer.id, portName: "region")))
         }
 
-        // 3. 各触发链：recognizer.<pulse> → pipeOut(trigger) → 块内节点
-        //    （脉冲连过去：识别器输出时机脉冲，管道出口作为链入口透传启动下游）
+        // 4. 各触发链：recognizer.<pulse> → pipeOut(trigger) → 块内节点
         func addPipe(_ triggerEvent: TriggerEvent, pulse: String, dy: Double) -> UUID {
             let pipe = NodeConfig(
                 type: .pipeOut,
@@ -117,10 +129,10 @@ public enum TimelineMigrator {
         }
 
         let blocks: [(trigger: TriggerEvent, pulse: String, block: Block, dy: Double)] = [
-            // onFirstTap：识别在 recognizer 根节点完成，块为空（仅管道出口作链入口标记）
+            // onFirstTap：识别在 recognizer 完成，块为空（仅管道出口作链入口标记）
             (.onFirstTap, "firstTap", Block([], [], []), 0),
             (.onEnterHolding, "enterHolding", buildEnterBlock(pipeline), 260),
-            (.onTick, "tick", buildTickBlock(pipeline, event: event), 520),
+            (.onTick, "tick", buildTickBlock(pipeline, event: event, recognizerID: recognizer.id, touchDataID: touchData.id), 520),
             (.onExitHolding, "exitHolding", buildExitBlock(pipeline), 780),
         ]
 
@@ -148,6 +160,7 @@ public enum TimelineMigrator {
 
     private static func buildEnterBlock(_ p: LegacyPipelineConfig) -> Block {
         var nodes: [NodeConfig] = []
+        var edges: [Edge] = []
         var entries: [UUID] = []
 
         // BaselineNode：记录进入时的原始信号值（key: "startRaw"）
@@ -159,15 +172,17 @@ public enum TimelineMigrator {
         nodes.append(baseline)
         entries.append(baseline.id)
 
-        // MouseNode：锁定光标（若配置了解除关联）
+        // cursorLocked = 1（外部状态变量，替代 mouse 专有卡片）
         if p.disassociateMouse {
-            let mouse = NodeConfig(
-                type: .mouse,
-                params: NodeParams(mouseMode: .lockPosition),
-                x: 0, y: 60, title: "锁定光标"
-            )
-            nodes.append(mouse)
-            entries.append(mouse.id)
+            let one = NodeConfig(type: .value, params: NodeParams(constant: 1),
+                                 x: 0, y: 60, title: "值 1")
+            let set = NodeConfig(type: .set, params: NodeParams(key: "cursorLocked"),
+                                 x: 150, y: 60, title: "设置锁定")
+            nodes.append(one)
+            nodes.append(set)
+            entries.append(set.id)
+            edges.append(Edge(from: PortID(nodeID: one.id, portName: "value"),
+                              to: PortID(nodeID: set.id, portName: "value")))
         }
 
         // HapticNode：进入震动
@@ -186,12 +201,13 @@ public enum TimelineMigrator {
             entries.append(haptic.id)
         }
 
-        return (nodes, [], entries)
+        return (nodes, edges, entries)
     }
 
     // MARK: - onTick（核心调节链路）
 
-    private static func buildTickBlock(_ p: LegacyPipelineConfig, event: EventConfig) -> Block {
+    private static func buildTickBlock(_ p: LegacyPipelineConfig, event: EventConfig,
+                                       recognizerID: UUID, touchDataID: UUID) -> Block {
         var nodes: [NodeConfig] = []
         var edges: [Edge] = []
         var entries: [UUID] = []
@@ -204,12 +220,18 @@ public enum TimelineMigrator {
             edges.append(Edge(from: from, to: to))
         }
 
-        // 1. TouchDataNode：唯一数据源（触控板多变量输出），按 signalSource 连对应字段端口
-        let touchData = add(NodeConfig(
-            type: .touchData,
-            x: 0, y: 0, title: "触控板数据"
+        // 1. isHolding 门控：识别器 holding 状态 → branch.cond（数据只在 holding 时放行）
+        //    touchData 是全局唯一数据源（复用顶层节点），经 branch 门控后进入变换链
+        let gate = add(NodeConfig(
+            type: .branch,
+            params: NodeParams(predicate: .positive),
+            x: 0, y: 0, title: "保持中?"
         ))
-        entries.append(touchData)
+        entries.append(gate)
+        connect(PortID(nodeID: recognizerID, portName: "isHolding"),
+                PortID(nodeID: gate, portName: "cond"))
+        connect(PortID(nodeID: touchDataID, portName: p.signalSource.rawValue),
+                PortID(nodeID: gate, portName: "value"))
 
         // 2. TransformNode：delta/absolute
         let transform = add(NodeConfig(
@@ -217,8 +239,7 @@ public enum TimelineMigrator {
             params: NodeParams(transform: p.transformMode),
             x: 150, y: 0, title: "变换"
         ))
-        connect(PortID(nodeID: touchData, portName: p.signalSource.rawValue),
-                PortID(nodeID: transform, portName: "value"))
+        connect(PortID(nodeID: gate, portName: "out1"), PortID(nodeID: transform, portName: "value"))
 
         // 3. QuantizeNode：discrete/continuous
         let quantize = add(NodeConfig(
@@ -266,7 +287,7 @@ public enum TimelineMigrator {
             connect(PortID(nodeID: consume, portName: "result"), PortID(nodeID: haptic, portName: "trigger"))
         }
 
-        // 6. false 分支（out2）：首次到达边界 → 边界震动 + 冻结
+        // 6. false 分支（out2）：到达边界 → 边界震动 + frozen=1（变量，替代 freeze 卡片）
         if p.hapticBoundary.enabled {
             let haptic = add(NodeConfig(
                 type: .haptic,
@@ -281,12 +302,12 @@ public enum TimelineMigrator {
             connect(PortID(nodeID: branch, portName: "out2"), PortID(nodeID: haptic, portName: "trigger"))
         }
 
-        let freeze = add(NodeConfig(
-            type: .freeze,
-            params: NodeParams(unfreeze: .reverseSlide),
-            x: 750, y: 60, title: "冻结"
-        ))
-        connect(PortID(nodeID: branch, portName: "out2"), PortID(nodeID: freeze, portName: "trigger"))
+        let one = add(NodeConfig(type: .value, params: NodeParams(constant: 1),
+                                 x: 750, y: 60, title: "值 1"))
+        let setFrozen = add(NodeConfig(type: .set, params: NodeParams(key: "frozen"),
+                                       x: 900, y: 60, title: "设置冻结"))
+        connect(PortID(nodeID: branch, portName: "out2"), PortID(nodeID: setFrozen, portName: "trigger"))
+        connect(PortID(nodeID: one, portName: "value"), PortID(nodeID: setFrozen, portName: "value"))
 
         return (nodes, edges, entries)
     }
@@ -295,16 +316,20 @@ public enum TimelineMigrator {
 
     private static func buildExitBlock(_ p: LegacyPipelineConfig) -> Block {
         var nodes: [NodeConfig] = []
+        var edges: [Edge] = []
         var entries: [UUID] = []
 
+        // cursorLocked = 0（解锁光标：变量操作，替代 mouse 专有卡片）
         if p.disassociateMouse {
-            let mouse = NodeConfig(
-                type: .mouse,
-                params: NodeParams(mouseMode: .unlockPosition),
-                x: 0, y: 0, title: "解锁光标"
-            )
-            nodes.append(mouse)
-            entries.append(mouse.id)
+            let zero = NodeConfig(type: .value, params: NodeParams(constant: 0),
+                                  x: 0, y: 0, title: "值 0")
+            let set = NodeConfig(type: .set, params: NodeParams(key: "cursorLocked"),
+                                 x: 150, y: 0, title: "解除锁定")
+            nodes.append(zero)
+            nodes.append(set)
+            entries.append(set.id)
+            edges.append(Edge(from: PortID(nodeID: zero.id, portName: "value"),
+                              to: PortID(nodeID: set.id, portName: "value")))
         }
 
         if p.hapticExit.enabled {
@@ -322,6 +347,6 @@ public enum TimelineMigrator {
             entries.append(haptic.id)
         }
 
-        return (nodes, [], entries)
+        return (nodes, edges, entries)
     }
 }

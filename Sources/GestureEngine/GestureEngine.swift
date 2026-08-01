@@ -31,8 +31,6 @@ public final class GestureEngine {
     private(set) var holdingCount = 0
     /// 当前 holding 的手势名（UI 显示）
     public private(set) var currentHoldingGestureName: String?
-    /// 冻结请求（freeze 节点置位 → 下一帧注入识别器）
-    private var freezeRequested = false
     /// 当前处理手势的事件引用（识别器 holding 进出时创建/写回）
     private var eventBox: EventBox?
     private var currentEventIndex: Int?
@@ -53,13 +51,8 @@ public final class GestureEngine {
             lastProcessTime = now
         }
 
-        // 上一帧的冻结请求传给识别器（freeze 节点执行 → 下一帧进入 frozen）
-        let pendingFreeze = freezeRequested
-        freezeRequested = false
         holdingCount = 0
         currentHoldingGestureName = nil
-
-        let sizeRange = config.global.touchSizeMin...config.global.touchSizeMax
 
         for gesture in config.gestures {
             // 绑定从图上 RegionRef/EventRef 节点读取（旧文件回退顶层字段）
@@ -72,25 +65,30 @@ public final class GestureEngine {
             // 边界状态：holding 中读事件 trackedValue；非 holding 无 eventBox → false
             let boundary = eventBox?.value.isAtAnyBoundary() ?? false
 
-            var frame = FrameContext(
+            let frame = FrameContext(
                 rawSignals: rawSignals(of: touches.first),
                 now: now,
                 directionRule: config.events[eventIndex].directionRule,
                 isAtBoundary: boundary,
                 touches: touches,
-                region: region,
-                sizeRange: sizeRange,
-                freezeRequested: pendingFreeze
+                region: region
             )
 
             var rt = runtime(for: gesture)
             rt.evaluator.evaluate(frame: frame, state: &rt.store, effects: effects, entryIDs: nil)
         }
 
-        // 鼠标锁定：任意手势 holding 即锁定
-        if mouseDisassociated && holdingCount > 0 {
+        // 鼠标锁定：由图上 cursorLocked 变量驱动（enter 链 set=1 / exit 链 set=0）
+        let locked = runtimes.values.contains { $0.store["cursorLocked"]?.boolValue == true }
+        if locked {
+            if !mouseDisassociated {
+                let event = CGEvent(source: nil)
+                lockedCursorPos = event?.location ?? .zero
+                CGAssociateMouseAndMouseCursorPosition(0)
+                mouseDisassociated = true
+            }
             CGWarpMouseCursorPosition(lockedCursorPos)
-        } else if mouseDisassociated && holdingCount == 0 {
+        } else if mouseDisassociated {
             CGAssociateMouseAndMouseCursorPosition(1)
             mouseDisassociated = false
         }
@@ -119,11 +117,6 @@ public final class GestureEngine {
             eventBox = nil
             effects.eventBox = nil
         }
-    }
-
-    /// freeze 节点执行 → 记录请求（下一帧识别器进入 frozen）
-    func requestFreeze() {
-        freezeRequested = true
     }
 
     private var currentGestureName: String? {

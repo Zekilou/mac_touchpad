@@ -52,6 +52,8 @@ public enum NodeType: String, Codable, CaseIterable {
     case quantize, gate, debounce
     // 条件分支
     case branch, `switch`
+    // 变量操作（外部状态通过 StateNode 变量 + 通用操作节点表达）
+    case set, toggle
     // 副作用/反馈
     case consume, haptic, hud, mouse, freeze, notify
     // 流控制
@@ -84,6 +86,9 @@ public enum NodeType: String, Codable, CaseIterable {
         // 条件分支
         case .branch:    return L10n.tr("条件分支", "Branch")
         case .`switch`:  return L10n.tr("多路开关", "Switch")
+        // 变量操作
+        case .set:       return L10n.tr("设置变量", "Set Var")
+        case .toggle:    return L10n.tr("取反变量", "Toggle Var")
         // 副作用/反馈
         case .consume:   return L10n.tr("消费输出", "Consume")
         case .haptic:    return L10n.tr("触觉反馈", "Haptic")
@@ -150,6 +155,11 @@ public struct NodeParams: Codable, Hashable {
     public var tapMaxDrift: Float?       // recognize
     public var tapMaxGap: Double?        // recognize
     public var holdMinDuration: Double?  // recognize
+    // 识别器算法参数（卡片内配置，不进数据流）
+    public var touchSizeMin: Float?      // recognizer 尺寸过滤下限（防手掌）
+    public var touchSizeMax: Float?      // recognizer 尺寸过滤上限
+    // 变量操作（set/toggle：key 见下方流控制）
+    public var value: Float?             // set：要写入变量的值
     // 绑定引用
     public var regionID: UUID?           // region
     public var eventID: UUID?            // event
@@ -199,6 +209,9 @@ public struct NodeParams: Codable, Hashable {
                 tapMaxDrift: Float? = nil,
                 tapMaxGap: Double? = nil,
                 holdMinDuration: Double? = nil,
+                touchSizeMin: Float? = nil,
+                touchSizeMax: Float? = nil,
+                value: Float? = nil,
                 regionID: UUID? = nil,
                 eventID: UUID? = nil,
                 transform: TransformMode? = nil,
@@ -236,6 +249,9 @@ public struct NodeParams: Codable, Hashable {
         self.tapMaxDrift = tapMaxDrift
         self.tapMaxGap = tapMaxGap
         self.holdMinDuration = holdMinDuration
+        self.touchSizeMin = touchSizeMin
+        self.touchSizeMax = touchSizeMax
+        self.value = value
         self.regionID = regionID
         self.eventID = eventID
         self.transform = transform
@@ -280,6 +296,9 @@ public struct NodeParams: Codable, Hashable {
         case "tapMaxDrift":    p.tapMaxDrift = value as? Float
         case "tapMaxGap":      p.tapMaxGap = value as? Double
         case "holdMinDuration": p.holdMinDuration = value as? Double
+        case "touchSizeMin":   p.touchSizeMin = value as? Float
+        case "touchSizeMax":   p.touchSizeMax = value as? Float
+        case "value":          p.value = value as? Float
         case "regionID":       p.regionID = value as? UUID
         case "eventID":        p.eventID = value as? UUID
         case "transform":      p.transform = value as? TransformMode

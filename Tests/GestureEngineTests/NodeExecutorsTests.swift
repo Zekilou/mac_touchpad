@@ -261,6 +261,34 @@ final class NodeExecutorsTests: XCTestCase {
         XCTAssertEqual(empty.outputs?["value"], .invalid())
     }
 
+    // MARK: 变量操作（set/toggle：外部状态变量 + 通用操作）
+
+    /// set：trigger 脉冲时把 value 写入 state[key]，输出 unit
+    func testSetWritesVariableOnTrigger() {
+        let set = floatNode(.set, NodeParams(key: "cursorLocked"))
+        // 无 trigger → 不执行
+        _ = exec(set, inputs: ["value": .float(1)])
+        XCTAssertNil(state["cursorLocked"])
+        // 有效 trigger → 写入
+        let r = exec(set, inputs: ["trigger": .unit(), "value": .float(1)])
+        XCTAssertEqual(r.outputs?["result"], .unit())
+        XCTAssertEqual(state["cursorLocked"]?.floatValue, 1)
+    }
+
+    /// toggle：trigger 脉冲时对 state[key] 取反（bool），输出 unit
+    func testToggleFlipsVariableOnTrigger() {
+        let toggle = floatNode(.toggle, NodeParams(key: "cursorLocked"))
+        // 初始无值 → false → true
+        _ = exec(toggle, inputs: ["trigger": .unit()])
+        XCTAssertEqual(state["cursorLocked"]?.boolValue, true)
+        // 再 toggle → false
+        _ = exec(toggle, inputs: ["trigger": .unit()])
+        XCTAssertEqual(state["cursorLocked"]?.boolValue, false)
+        // 无 trigger → 不翻转
+        _ = exec(toggle)
+        XCTAssertEqual(state["cursorLocked"]?.boolValue, false)
+    }
+
     // MARK: - Predicate 求值
 
     func testPredicateFirstTimeOnlyOnce() {
