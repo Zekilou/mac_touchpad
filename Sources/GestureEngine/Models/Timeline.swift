@@ -36,12 +36,16 @@ public enum TriggerEvent: String, Codable, CaseIterable {
 /// 可在 Timeline 上拖放的逻辑节点
 /// @ai: do not remove existing cases
 public enum NodeType: String, Codable, CaseIterable {
+    // 触发入口（引擎按此时机执行其下游链）
+    case trigger
     // 数据源
     case signal, value
     // 触发识别（状态机参数）
     case recognize
     // 绑定引用（手势↔区域/事件 关联）
     case region, event
+    // 批注组（视觉分组框，不参与执行）
+    case group
     // 数学/变换
     case transform, scale, clamp, abs, sign
     // 量化/门控
@@ -55,6 +59,8 @@ public enum NodeType: String, Codable, CaseIterable {
 
     public var displayName: String {
         switch self {
+        // 触发入口
+        case .trigger:   return L10n.tr("触发节点", "Trigger")
         // 数据源
         case .signal:    return L10n.tr("信号源", "Signal")
         case .value:     return L10n.tr("常量值", "Value")
@@ -63,6 +69,8 @@ public enum NodeType: String, Codable, CaseIterable {
         // 绑定引用
         case .region:    return L10n.tr("区域引用", "Region Ref")
         case .event:     return L10n.tr("事件引用", "Event Ref")
+        // 批注组
+        case .group:     return L10n.tr("批注组", "Group")
         // 数学/变换
         case .transform: return L10n.tr("变换", "Transform")
         case .scale:     return L10n.tr("缩放", "Scale")
@@ -111,6 +119,10 @@ public struct PortID: Codable, Hashable {
 /// 所有节点的参数合集；Optional 字段未设置时 = 默认行为
 /// 类型安全的"AnyCodable"替代，UI 绑定和 Codable 都简单
 public struct NodeParams: Codable, Hashable {
+    // 触发入口 / 批注组
+    public var trigger: TriggerEvent?    // trigger 节点：引擎执行时机
+    public var groupWidth: Double?       // group 框宽
+    public var groupHeight: Double?      // group 框高
     // 数据源
     public var source: SignalSource?     // signal
     public var constant: Float?          // value
@@ -159,7 +171,10 @@ public struct NodeParams: Codable, Hashable {
     public init() {}
 
     /// 便捷初始化：常用参数一键填充（其余字段默认 nil）
-    public init(source: SignalSource? = nil,
+    public init(trigger: TriggerEvent? = nil,
+                groupWidth: Double? = nil,
+                groupHeight: Double? = nil,
+                source: SignalSource? = nil,
                 constant: Float? = nil,
                 tapMaxDuration: Double? = nil,
                 tapMaxDrift: Float? = nil,
@@ -193,6 +208,9 @@ public struct NodeParams: Codable, Hashable {
                 mergeMode: MergeMode? = nil,
                 key: String? = nil,
                 delayMs: Double? = nil) {
+        self.trigger = trigger
+        self.groupWidth = groupWidth
+        self.groupHeight = groupHeight
         self.source = source
         self.constant = constant
         self.tapMaxDuration = tapMaxDuration
@@ -234,6 +252,9 @@ public struct NodeParams: Codable, Hashable {
     public func setting(key: String, _ value: Any?) -> NodeParams {
         var p = self
         switch key {
+        case "trigger":        p.trigger = value as? TriggerEvent
+        case "groupWidth":     p.groupWidth = value as? Double
+        case "groupHeight":    p.groupHeight = value as? Double
         case "source":         p.source = value as? SignalSource
         case "constant":       p.constant = value as? Float
         case "tapMaxDuration": p.tapMaxDuration = value as? Double

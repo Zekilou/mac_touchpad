@@ -3,8 +3,10 @@ import SwiftUI
 import struct GestureEngine.Edge
 import GestureEngine
 
-/// 核心画布：节点定位 + 拖拽 + 缩放平移 + 贝塞尔连线 + 删除
-/// 状态（timeline/zoom/pan/选中）由容器持有，便于侧栏联动
+/// 核心画布（v5 单图版）：一张自由节点图
+/// - 节点定位/拖拽/缩放平移/贝塞尔连线/删除
+/// - Trigger 节点黄色强调；Group 节点渲染为批注框（拖拽整体移动框内节点）
+/// - 触控板：两指滑动平移（scrollWheel）、捏合缩放（MagnifyGesture）
 struct TimelineCanvasView: View {
     @Binding var timeline: TimelineConfig
     @Binding var zoom: CGFloat
@@ -18,17 +20,36 @@ struct TimelineCanvasView: View {
     /// 手势起点快照
     @State private var panOrigin: CGSize?
     @State private var zoomOrigin: CGFloat?
+    @State private var didFit = false
+
+    private var groupNodes: [NodeConfig] { timeline.nodes.filter { $0.type == .group } }
+    private var regularNodes: [NodeConfig] { timeline.nodes.filter { $0.type != .group } }
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                // 背景（承载平移/缩放手势）
+                // 背景（承载平移/缩放/触控板手势）
                 Rectangle()
                     .fill(Color.primary.opacity(0.03))
                     .contentShape(Rectangle())
                     .gesture(panGesture)
                     .gesture(magnifyGesture)
                     .onTapGesture { selectedNodeID = nil }
+                    .background(
+                        ScrollWheelCatcher { dx, dy in
+                            pan.width -= dx
+                            pan.height -= dy
+                        }
+                    )
+
+                // 组框层（在节点下方）
+                ForEach(groupNodes) { node in
+                    groupFrame(node)
+                        .position(x: node.x + groupWidth(node) / 2,
+                                  y: node.y + groupHeight(node) / 2)
+                        .onTapGesture { selectedNodeID = node.id }
+                        .gesture(dragGroup(node))
+                }
 
                 // 连线层（固定边 + 进行中虚线）
                 Canvas { context, _ in
@@ -39,7 +60,7 @@ struct TimelineCanvasView: View {
                 .allowsHitTesting(false)
 
                 // 节点层
-                ForEach(timeline.nodes) { node in
+                ForEach(regularNodes) { node in
                     TimelineNodeView(
                         node: node,
                         isSelected: node.id == selectedNodeID,
@@ -54,8 +75,71 @@ struct TimelineCanvasView: View {
             }
             .scaleEffect(zoom, anchor: .topLeading)
             .offset(x: pan.width, y: pan.height)
+            .onAppear {
+                if !didFit { fitToContent(geo.size); didFit = true }
+            }
             .onDeleteCommand { deleteSelection() }
         }
+    }
+
+    // MARK: - 组框
+
+    private func groupWidth(_ node: NodeConfig) -> CGFloat {
+        CGFloat(node.params.groupWidth ?? 300)
+    }
+    private func groupHeight(_ node: NodeConfig) -> CGFloat {
+        CGFloat(node.params.groupHeight ?? 200)
+    }
+
+    /// 批注组框：虚线框 + 标题，尺寸在属性面板调
+    private func groupFrame(_ node: NodeConfig) -> some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.03))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(node.id == selectedNodeID ? Color.accentColor : Color.primary.opacity(0.25),
+                                      style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                )
+            HStack(spacing: 4) {
+                Image(systemName: "square.dashed").font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text(node.title ?? L10n.tr("批注组", "Group"))
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+        }
+        .frame(width: groupWidth(node), height: groupHeight(node))
+        .contentShape(Rectangle())
+    }
+
+    /// 拖拽组框：移动组框本身 + 框内节点（几何包含判定，用拖前位置快照）
+    private func dragGroup(_ node: NodeConfig) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard let idx = timeline.nodes.firstIndex(where: { $0.id == node.id }) else { return }
+                if dragOrigin?.id != node.id { dragOrigin = (node.id, node.x, node.y) }
+                guard let origin = dragOrigin else { return }
+                let dx = Double(value.translation.width / zoom)
+                let dy = Double(value.translation.height / zoom)
+                let w = groupWidth(node)
+                let h = groupHeight(node)
+                timeline.nodes[idx].x = origin.x + dx
+                timeline.nodes[idx].y = origin.y + dy
+                for i in timeline.nodes.indices where i != idx {
+                    let n = timeline.nodes[i]
+                    let cx = n.x + TimelineCanvasMetrics.nodeWidth / 2
+                    let cy = n.y + TimelineCanvasMetrics.nodeHeight / 2
+                    if cx >= origin.x, cx <= origin.x + Double(w),
+                       cy >= origin.y, cy <= origin.y + Double(h) {
+                        timeline.nodes[i].x = n.x + dx
+                        timeline.nodes[i].y = n.y + dy
+                    }
+                }
+            }
+            .onEnded { _ in dragOrigin = nil }
     }
 
     // MARK: - 坐标变换（与 scaleEffect(topLeading)+offset 一致）
@@ -115,7 +199,7 @@ struct TimelineCanvasView: View {
 
     private func hitTestInputPort(at point: CGPoint) -> NodeConfig? {
         let r = TimelineCanvasMetrics.portHitRadius
-        for node in timeline.nodes where connecting?.from.id != node.id {
+        for node in regularNodes where connecting?.from.id != node.id {
             let p = node.inputPortPoint
             if (p.x - point.x) * (p.x - point.x) + (p.y - point.y) * (p.y - point.y) <= r * r {
                 return node
@@ -125,7 +209,8 @@ struct TimelineCanvasView: View {
     }
 
     private func drawEdge(_ edge: Edge, in context: inout GraphicsContext) {
-        guard let from = node(edge.from.nodeID), let to = node(edge.to.nodeID) else { return }
+        guard let from = node(edge.from.nodeID), let to = node(edge.to.nodeID),
+              from.type != .group, to.type != .group else { return }
         let start = from.outputPortPoint
         let end = to.inputPortPoint
         let dx = max(abs(end.x - start.x), 40) * TimelineCanvasMetrics.curveFactor
@@ -147,7 +232,35 @@ struct TimelineCanvasView: View {
                        style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
     }
 
-    // MARK: - 删除
+    // MARK: - 适应画布 / 删除
+
+    /// 初始/手动：缩放平移使全部内容（含组框）可见
+    func fitToContent(_ canvasSize: CGSize) {
+        guard !timeline.nodes.isEmpty else { zoom = 1; pan = .zero; return }
+        let w = TimelineCanvasMetrics.nodeWidth
+        let h = TimelineCanvasMetrics.nodeHeight
+        let minX = timeline.nodes.map { min($0.x, $0.x) }.min()!
+        let maxX = timeline.nodes.map { node -> Double in
+            if node.type == .group {
+                return node.x + (node.params.groupWidth ?? 300)
+            }
+            return node.x + Double(w)
+        }.max()!
+        let minY = timeline.nodes.map(\.y).min()!
+        let maxY = timeline.nodes.map { node -> Double in
+            if node.type == .group {
+                return node.y + (node.params.groupHeight ?? 200)
+            }
+            return node.y + Double(h)
+        }.max()!
+        let contentW = maxX - minX + 160
+        let contentH = maxY - minY + 160
+        zoom = min(canvasSize.width / contentW, canvasSize.height / contentH, 1.0)
+        pan = CGSize(
+            width: (canvasSize.width - (maxX + minX) * Double(zoom)) / 2 - 80,
+            height: (canvasSize.height - (maxY + minY) * Double(zoom)) / 2 - 80
+        )
+    }
 
     private func deleteSelection() {
         guard let id = selectedNodeID else { return }

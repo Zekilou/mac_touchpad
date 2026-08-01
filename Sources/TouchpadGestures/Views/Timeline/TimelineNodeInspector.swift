@@ -7,6 +7,8 @@ extension NodeType {
     /// SF Symbol 图标（按功能大类分组）
     var symbolName: String {
         switch self {
+        case .trigger:    return "bolt.fill"
+        case .group:      return "square.dashed"
         case .signal:     return "waveform.path.ecg"
         case .value:      return "number"
         case .recognize:  return "hand.tap"
@@ -38,6 +40,8 @@ extension NodeType {
     /// 大类配色
     var tintColor: Color {
         switch self {
+        case .trigger:                              return .yellow
+        case .group:                                return .gray
         case .signal, .value, .recognize, .region, .event: return .blue
         case .transform, .scale, .clamp, .abs, .sign: return .purple
         case .quantize, .gate, .debounce:           return .orange

@@ -36,6 +36,13 @@ public enum NodeExecutors {
         case .region, .event:
             return .init()
 
+        // 触发入口：输出 unit 激活下游链（不参与本身执行）
+        case .trigger:
+            return unit()
+        // 批注组：纯结构节点（无执行逻辑）
+        case .group:
+            return .init()
+
         // MARK: 数学/变换
         case .transform:
             guard let v = inputs["input"]?.floatValue else { return .init() }

@@ -16,8 +16,8 @@ final class TimelineRuntimeTests: XCTestCase {
     }
 
     private func makeRuntime() -> TimelineRuntime {
-        let timelines = TimelineMigrator.migrate(pipeline: LegacyPipelineConfig(), event: makeEvent())
-        return TimelineRuntime(timelines: timelines, effects: effects)
+        let graph = TimelineMigrator.migrate(pipeline: LegacyPipelineConfig(), event: makeEvent())
+        return TimelineRuntime(timeline: graph, effects: effects)!
     }
 
     // MARK: - 结构
@@ -116,8 +116,8 @@ final class TimelineRuntimeTests: XCTestCase {
         pipeline.disassociateMouse = false
         pipeline.hapticEnter = HapticEvent(enabled: false, waveform: 2, count: 1, intervalUs: 0)
         let runtime = TimelineRuntime(
-            timelines: TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent()),
-            effects: effects)
+            timeline: TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent()),
+            effects: effects)!
 
         runtime.handle(.onEnterHolding,
                        frame: FrameContext(rawSignals: [.normY: 0.8], directionRule: .positiveDecrease))

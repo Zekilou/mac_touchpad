@@ -115,8 +115,8 @@ public enum ConfigStore {
                 holdMinDuration: g2.holdMinDuration)
             return GestureConfig(id: g2.id, name: g2.name,
                                  regionID: g2.regionID, eventID: g2.eventID,
-                                 timelines: TimelineMigrator.migrate(pipeline: pipeline, event: event,
-                                                                     regionID: g2.regionID, eventID: g2.eventID))
+                                 timeline: TimelineMigrator.migrate(pipeline: pipeline, event: event,
+                                                                    regionID: g2.regionID, eventID: g2.eventID))
         }
         return AppConfig(version: 3, global: v2.global, regions: v2.regions,
                          gestures: gestures, events: v2.events)
@@ -146,11 +146,11 @@ public enum ConfigStore {
         rightPipeline.stepNorm = v1.volumeStepNorm
 
         let leftGesture = GestureConfig(name: "左侧", regionID: left.id, eventID: brightness.id,
-                                        timelines: TimelineMigrator.migrate(pipeline: leftPipeline, event: brightness,
-                                                                            regionID: left.id, eventID: brightness.id))
+                                        timeline: TimelineMigrator.migrate(pipeline: leftPipeline, event: brightness,
+                                                                           regionID: left.id, eventID: brightness.id))
         let rightGesture = GestureConfig(name: "右侧", regionID: right.id, eventID: volume.id,
-                                         timelines: TimelineMigrator.migrate(pipeline: rightPipeline, event: volume,
-                                                                             regionID: right.id, eventID: volume.id))
+                                         timeline: TimelineMigrator.migrate(pipeline: rightPipeline, event: volume,
+                                                                            regionID: right.id, eventID: volume.id))
         return AppConfig(version: 3, global: global, regions: [left, right],
                          gestures: [leftGesture, rightGesture], events: [volume, brightness])
     }

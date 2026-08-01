@@ -84,6 +84,7 @@ struct NodeParamsEditorView: View {
         case let v as MergeMode:      enumPicker(key: key, value: v, allCases: MergeMode.allCases) { $0.rawValue }
         case let v as ActionType:     enumPicker(key: key, value: v, allCases: ActionType.allCases) { $0.displayName }
         case let v as ExecutionMethod: enumPicker(key: key, value: v, allCases: ExecutionMethod.allCases) { $0.displayName }
+        case let v as TriggerEvent:   enumPicker(key: key, value: v, allCases: TriggerEvent.allCases) { $0.displayName }
         default:
             // Predicate 等复合类型：只读展示
             Text(String(describing: value))

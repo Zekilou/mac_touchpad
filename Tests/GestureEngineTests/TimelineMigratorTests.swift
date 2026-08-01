@@ -3,10 +3,7 @@ import XCTest
 
 final class TimelineMigratorTests: XCTestCase {
 
-    private var regionID: UUID { UUID() }
-    private var eventID: UUID { UUID() }
-
-    /// 默认管线（v3 迁移输入，等价 v2 全默认）
+    /// 默认管线（v5 迁移输入，等价 v2 全默认）
     private func makePipeline() -> LegacyPipelineConfig {
         LegacyPipelineConfig()
     }
@@ -17,113 +14,111 @@ final class TimelineMigratorTests: XCTestCase {
                     step: 0.0125, boundaryThreshold: 0.001)
     }
 
-    // MARK: - 总体结构
+    // MARK: - 总体结构（单图 + Trigger 入口）
 
-    func testMigrate_ProducesFourTimelinesInOrder() {
-        let timelines = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
-        XCTAssertEqual(timelines.map(\.trigger),
-                       [.onFirstTap, .onEnterHolding, .onTick, .onExitHolding])
-    }
-
-    func testMigrate_EachTimelinePassesTopologicalValidation() {
-        let timelines = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
-        for timeline in timelines {
-            switch TimelineGraphValidator.topologicalOrder(of: timeline) {
-            case .valid(let order):
-                XCTAssertEqual(Set(order), Set(timeline.nodes.map(\.id)), "\(timeline.trigger) 拓扑排序节点不完整")
-            case let result:
-                XCTFail("\(timeline.trigger) 验证失败: \(result)")
-            }
+    func testMigrate_ProducesSingleGraphWithFourTriggers() {
+        let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
+        // 4 个 Trigger 入口节点（不再分 4 条 timeline）
+        let triggers = graph.nodes
+            .filter { $0.type == .trigger }
+            .compactMap { $0.params.trigger }
+        XCTAssertEqual(Set(triggers),
+                       Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
+        // 拓扑验证通过
+        switch TimelineGraphValidator.topologicalOrder(of: graph) {
+        case .valid(let order):
+            XCTAssertEqual(Set(order), Set(graph.nodes.map(\.id)))
+        case let result:
+            XCTFail("拓扑验证失败: \(result)")
         }
     }
 
-    // MARK: - onFirstTap（触发识别）
+    func testMigrate_TriggerConnectsToBlockEntries() {
+        let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
+        // onTick 的 Trigger → signal（tick 链入口）
+        let tickTrigger = graph.nodes.first { $0.type == .trigger && $0.params.trigger == .onTick }!
+        let signal = graph.firstNode(of: .signal)!
+        XCTAssertTrue(graph.edges.contains {
+            $0.from == PortID(nodeID: tickTrigger.id, portName: "output")
+                && $0.to == PortID(nodeID: signal.id, portName: "input")
+        })
+        // onFirstTap 的 Trigger → recognize（识别入口）
+        let tapTrigger = graph.nodes.first { $0.type == .trigger && $0.params.trigger == .onFirstTap }!
+        let recognize = graph.firstNode(of: .recognize)!
+        XCTAssertTrue(graph.edges.contains {
+            $0.from == PortID(nodeID: tapTrigger.id, portName: "output")
+                && $0.to == PortID(nodeID: recognize.id, portName: "input")
+        })
+    }
 
-    func testRecognizeTimeline_CarriesTapParams() {
+    // MARK: - onFirstTap（触发识别 + 绑定）
+
+    func testRecognizeNode_CarriesTapParams() {
         var pipeline = makePipeline()
         pipeline.tapMaxDuration = 0.35
         pipeline.tapMaxDrift = 0.08
         pipeline.tapMaxGap = 0.5
         pipeline.holdMinDuration = 0.25
 
-        let timeline = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())[0]
-        let recognize = timeline.firstNode(of: .recognize)
+        let graph = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())
+        let recognize = graph.firstNode(of: .recognize)
         XCTAssertNotNil(recognize)
         XCTAssertEqual(recognize?.params.tapMaxDuration, 0.35)
         XCTAssertEqual(recognize?.params.tapMaxDrift, 0.08)
         XCTAssertEqual(recognize?.params.tapMaxGap, 0.5)
         XCTAssertEqual(recognize?.params.holdMinDuration, 0.25)
-        XCTAssertTrue(timeline.entryNodeIDs.contains(recognize!.id))
     }
 
-    func testRecognizeTimeline_WithBindings_GeneratesRefNodes() {
+    func testMigrate_WithBindings_GeneratesRefNodes() {
         let region = UUID()
         let event = UUID()
-        let timeline = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent(),
-                                                regionID: region, eventID: event)[0]
-        // 绑定引用节点（区域 + 事件）
-        let regionRef = timeline.firstNode(of: .region)
-        let eventRef = timeline.firstNode(of: .event)
-        XCTAssertEqual(regionRef?.params.regionID, region)
-        XCTAssertEqual(eventRef?.params.eventID, event)
-        XCTAssertTrue(timeline.entryNodeIDs.contains(regionRef!.id))
-        XCTAssertTrue(timeline.entryNodeIDs.contains(eventRef!.id))
+        let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent(),
+                                             regionID: region, eventID: event)
+        XCTAssertEqual(graph.firstNode(of: .region)?.params.regionID, region)
+        XCTAssertEqual(graph.firstNode(of: .event)?.params.eventID, event)
         // 不带绑定时无 ref 节点
-        let plain = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[0]
+        let plain = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
         XCTAssertNil(plain.firstNode(of: .region))
         XCTAssertNil(plain.firstNode(of: .event))
     }
 
     // MARK: - onEnterHolding
 
-    func testEnterTimeline_ContainsBaselineNode() {
-        let timeline = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[1]
-        let baseline = timeline.firstNode(of: .baseline)
+    func testEnterBlock_ContainsBaselineNode() {
+        let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
+        let baseline = graph.firstNode(of: .baseline)
         XCTAssertNotNil(baseline)
         XCTAssertEqual(baseline?.params.key, "startRaw")
         XCTAssertEqual(baseline?.params.source, .normY)
-        XCTAssertTrue(timeline.entryNodeIDs.contains(baseline!.id))
     }
 
-    func testEnterTimeline_MouseNodeFollowsDisassociate() {
-        // disassociateMouse = true → 有 lockPosition 节点
-        let withMouse = makePipeline()
-        XCTAssertTrue(withMouse.disassociateMouse)
-        let t1 = TimelineMigrator.migrate(pipeline: withMouse, event: makeEvent())[1]
+    func testEnterBlock_MouseAndHapticFollowConfig() {
+        // 默认：lockPosition mouse + enter haptic
+        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
         XCTAssertEqual(t1.firstNode(of: .mouse)?.params.mouseMode, .lockPosition)
-
-        // disassociateMouse = false → 无 mouse 节点
-        var noMouse = withMouse
-        noMouse.disassociateMouse = false
-        let t2 = TimelineMigrator.migrate(pipeline: noMouse, event: makeEvent())[1]
-        XCTAssertNil(t2.firstNode(of: .mouse))
-    }
-
-    func testEnterTimeline_HapticFollowsEnabled() {
-        // enabled → 有 haptic 节点
-        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[1]
-        XCTAssertNotNil(t1.firstNode(of: .haptic))
         XCTAssertEqual(t1.firstNode(of: .haptic)?.params.waveform, HapticEvent.enter.waveform)
 
-        // disabled → 无 haptic 节点
+        // 关闭：无 mouse（enter/exit 都无）
         var pipeline = makePipeline()
+        pipeline.disassociateMouse = false
         pipeline.hapticEnter = HapticEvent(enabled: false, waveform: 2, count: 1, intervalUs: 0)
-        let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())[1]
-        XCTAssertNil(t2.firstNode(of: .haptic))
+        let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())
+        XCTAssertNil(t2.firstNode(of: .mouse))
+        // 剩余 haptic = tick 震动 + 边界震动
+        XCTAssertEqual(t2.nodes.filter { $0.type == .haptic }.count, 2)
     }
 
-    // MARK: - onTick
+    // MARK: - onTick（核心调节链路）
 
-    func testTickTimeline_CoreChain() {
-        let timeline = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[2]
+    func testTickChain_CoreNodesAndEdges() {
+        let graph = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
 
-        // 核心 6 节点都存在
-        let signal = timeline.firstNode(of: .signal)
-        let transform = timeline.firstNode(of: .transform)
-        let quantize = timeline.firstNode(of: .quantize)
-        let branch = timeline.firstNode(of: .branch)
-        let consume = timeline.firstNode(of: .consume)
-        let freeze = timeline.firstNode(of: .freeze)
+        let signal = graph.firstNode(of: .signal)
+        let transform = graph.firstNode(of: .transform)
+        let quantize = graph.firstNode(of: .quantize)
+        let branch = graph.firstNode(of: .branch)
+        let consume = graph.firstNode(of: .consume)
+        let freeze = graph.firstNode(of: .freeze)
         XCTAssertNotNil(signal)
         XCTAssertNotNil(transform)
         XCTAssertNotNil(quantize)
@@ -140,10 +135,10 @@ final class TimelineMigratorTests: XCTestCase {
         XCTAssertEqual(consume?.params.method, .mediaKey)
         XCTAssertEqual(consume?.params.step, 0.0125)
 
-        // 边：signal→transform→quantize→branch
+        // 边：signal→transform→quantize→branch；true→consume；false→freeze
         func connected(_ from: NodeConfig?, _ to: NodeConfig?, port: String) -> Bool {
             guard let from, let to else { return false }
-            return timeline.edges.contains {
+            return graph.edges.contains {
                 $0.from == PortID(nodeID: from.id, portName: "output")
                     && $0.to == PortID(nodeID: to.id, portName: "input")
             }
@@ -151,51 +146,47 @@ final class TimelineMigratorTests: XCTestCase {
         XCTAssertTrue(connected(signal, transform, port: "input"))
         XCTAssertTrue(connected(transform, quantize, port: "input"))
         XCTAssertTrue(connected(quantize, branch, port: "input"))
-        // branch 的 true → consume
-        XCTAssertTrue(timeline.edges.contains {
+        XCTAssertTrue(graph.edges.contains {
             $0.from == PortID(nodeID: branch!.id, portName: "true")
                 && $0.to == PortID(nodeID: consume!.id, portName: "input")
         })
-        // branch 的 false → freeze
-        XCTAssertTrue(timeline.edges.contains {
+        XCTAssertTrue(graph.edges.contains {
             $0.from == PortID(nodeID: branch!.id, portName: "false")
                 && $0.to == PortID(nodeID: freeze!.id, portName: "input")
         })
     }
 
-    func testTickTimeline_HapticTickFollowsEnabled() {
+    func testTickBlock_HapticFollowsEnabled() {
         // 默认：tick 震动 + 边界震动 两个 haptic 节点
-        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[2]
-        XCTAssertEqual(t1.nodes.filter { $0.type == .haptic }.count, 2)
+        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
+        XCTAssertEqual(t1.nodes.filter { $0.type == .haptic }.count, 3)
 
-        // 禁用 tick 震动 → 仅剩边界震动
+        // 禁用 tick 震动 → 剩 enter + 边界
         var pipeline = makePipeline()
         pipeline.hapticTick = HapticEvent(enabled: false, waveform: 4, count: 1, intervalUs: 0)
-        let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())[2]
-        XCTAssertEqual(t2.nodes.filter { $0.type == .haptic }.count, 1)
+        let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())
+        XCTAssertEqual(t2.nodes.filter { $0.type == .haptic }.count, 2)
     }
 
     // MARK: - onExitHolding
 
-    func testExitTimeline_UnlocksMouse() {
-        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[3]
-        XCTAssertEqual(t1.firstNode(of: .mouse)?.params.mouseMode, .unlockPosition)
-
-        var pipeline = makePipeline()
-        pipeline.disassociateMouse = false
-        let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())[3]
-        XCTAssertNil(t2.firstNode(of: .mouse))
+    func testExitBlock_UnlocksMouse() {
+        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
+        // 图上第一个 mouse 是 enter 的 lock；exit 的 unlock 节点存在
+        XCTAssertNotNil(t1.nodes.first {
+            $0.type == .mouse && $0.params.mouseMode == .unlockPosition
+        })
     }
 
-    func testExitTimeline_HapticExitDefaultsDisabled() {
-        // 默认 hapticExit 关闭 → exit timeline 无 haptic 节点
-        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())[3]
-        XCTAssertNil(t1.firstNode(of: .haptic))
+    func testExitBlock_HapticExitDefaultsDisabled() {
+        // 默认 hapticExit 关闭 → 图上无 exit 震动（总 haptic = enter + tick + boundary = 3）
+        let t1 = TimelineMigrator.migrate(pipeline: makePipeline(), event: makeEvent())
+        XCTAssertEqual(t1.nodes.filter { $0.type == .haptic }.count, 3)
 
-        // 开启后 → 有 haptic 节点
+        // 开启后 → 多一个 exit 震动（4 个）
         var pipeline = makePipeline()
         pipeline.hapticExit = HapticEvent(enabled: true, waveform: 4, count: 1, intervalUs: 0)
-        let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())[3]
-        XCTAssertNotNil(t2.firstNode(of: .haptic))
+        let t2 = TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent())
+        XCTAssertEqual(t2.nodes.filter { $0.type == .haptic }.count, 4)
     }
 }

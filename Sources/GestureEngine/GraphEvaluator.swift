@@ -1,8 +1,8 @@
 import Foundation
 
-/// 单条 Timeline 的图执行器
+/// 单张节点图的执行器（v5 完全配置化）
 /// - 构造时做拓扑排序验证（环/悬挂边 → init 失败）
-/// - evaluate 按拓扑序执行所有节点：读入边端口值 → 分支激活检查 → 执行 → 写输出端口值
+/// - evaluate 按拓扑序执行：从给定入口（Trigger 节点）出发的可达子图
 /// - 纯计算节点可重复执行（dry-run）；副作用经 TimelineEffects 派发
 public final class GraphEvaluator {
     public let timeline: TimelineConfig
@@ -24,12 +24,22 @@ public final class GraphEvaluator {
     }
 
     /// 执行一次 evaluate（一帧/一次触发事件）
-    public func evaluate(frame: FrameContext, state: inout StateStore, effects: TimelineEffects) {
+    /// - Parameter entryIDs: 本次执行入口（Trigger 节点）。nil = 执行整张图（dry-run）。
+    public func evaluate(frame: FrameContext, state: inout StateStore, effects: TimelineEffects,
+                         entryIDs: [UUID]? = nil) {
         portValues.removeAll(keepingCapacity: true)
         branchResults.removeAll(keepingCapacity: true)
         let nodesByID = Dictionary(uniqueKeysWithValues: timeline.nodes.map { ($0.id, $0) })
 
-        for nodeID in order {
+        // 入口可达集：只执行从 Trigger 出发可达的链，不同 Trigger 互不干扰
+        let reachable: Set<UUID>
+        if let entryIDs {
+            reachable = reachableSet(from: entryIDs)
+        } else {
+            reachable = Set(order)
+        }
+
+        for nodeID in order where reachable.contains(nodeID) {
             guard let node = nodesByID[nodeID] else { continue }
             let incoming = timeline.incomingEdges(to: nodeID)
 
@@ -72,5 +82,20 @@ public final class GraphEvaluator {
     public func reset() {
         portValues.removeAll(keepingCapacity: true)
         branchResults.removeAll(keepingCapacity: true)
+    }
+
+    // MARK: - 可达集
+
+    /// 从入口节点沿出边 BFS 收集可达节点集合（含入口自身）
+    private func reachableSet(from entries: [UUID]) -> Set<UUID> {
+        var visited: Set<UUID> = []
+        var stack = entries
+        while let id = stack.popLast() {
+            guard visited.insert(id).inserted else { continue }
+            for edge in timeline.outgoingEdges(from: id) {
+                stack.append(edge.to.nodeID)
+            }
+        }
+        return visited
     }
 }

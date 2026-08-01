@@ -14,6 +14,8 @@ struct NodePaletteView: View {
     /// 绑定可选项（region/event 节点参数面板用）
     let events: [EventConfig]
     let regions: [RegionConfig]
+    /// 适应画布（由外层持有画布状态，此处回调）
+    let onFit: () -> Void
 
     /// 新节点自动排列计数（对角线排布避免重叠）
     @State private var addCount: Int = 0
@@ -31,7 +33,7 @@ struct NodePaletteView: View {
                     .font(.caption.monospacedDigit())
                     .frame(width: 42, alignment: .center)
                 zoomButton(systemImage: "plus.magnifyingglass") { zoom = min(zoom * 1.2, 3.0) }
-                zoomButton(systemImage: "arrow.up.left.and.arrow.down.right") { fitCanvas() }
+                zoomButton(systemImage: "arrow.up.left.and.arrow.down.right") { onFit() }
                     .help(L10n.tr("适应画布", "Fit canvas"))
             }
             .padding(.horizontal, 10)
@@ -92,7 +94,11 @@ struct NodePaletteView: View {
         }
         .padding(10)
         .frame(width: 230)
-        .background(Color.primary.opacity(0.02))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+        )
     }
 
     // MARK: - 缩放按钮
@@ -157,24 +163,5 @@ struct NodePaletteView: View {
             .buttonStyle(.borderless)
             .help(L10n.tr("删除连线", "Remove edge"))
         }
-    }
-
-    // MARK: - 适应画布
-
-    private func fitCanvas() {
-        guard !timeline.nodes.isEmpty else { zoom = 1; pan = .zero; return }
-        let w = TimelineCanvasMetrics.nodeWidth
-        let h = TimelineCanvasMetrics.nodeHeight
-        let minX = timeline.nodes.map(\.x).min()!
-        let maxX = timeline.nodes.map { $0.x + w }.max()!
-        let minY = timeline.nodes.map(\.y).min()!
-        let maxY = timeline.nodes.map { $0.y + h }.max()!
-        let contentW = maxX - minX + 120
-        let contentH = maxY - minY + 120
-        zoom = min(canvasSize.width / contentW, canvasSize.height / contentH, 1.0)
-        pan = CGSize(
-            width: (canvasSize.width - (maxX + minX) * zoom) / 2 - 60,
-            height: (canvasSize.height - (maxY + minY) * zoom) / 2 - 60
-        )
     }
 }

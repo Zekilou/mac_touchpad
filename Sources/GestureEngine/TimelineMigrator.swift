@@ -3,7 +3,7 @@ import Foundation
 // MARK: - v2 管线值对象（迁移器输入）
 
 /// v2 线性管线的全部可配置参数（迁移前 GestureConfig 的字段集合）
-/// 引擎/配置解码时从 v2 字段组装此对象 → 迁移为 Timeline 图
+/// 引擎/配置解码时从 v2 字段组装此对象 → 迁移为单张节点图
 public struct LegacyPipelineConfig {
     public var signalSource: SignalSource
     public var transformMode: TransformMode
@@ -54,38 +54,67 @@ public struct LegacyPipelineConfig {
 
 // MARK: - 迁移器
 
-/// v2 线性管线 → Timeline 图集迁移器
+/// v2 线性管线 → 单张自由节点图迁移器（v5 完全配置化）
 ///
-/// 生成 4 条 Timeline（等价于 v2 配置的全部行为）：
-///   - onFirstTap：触发识别（轻点参数）→ 状态机读取
-///   - onEnterHolding：记录基线 + 锁鼠标 + 进入震动
-///   - onTick：信号→变换→量化→分支(边界?)→消费/冻结
-///   - onExitHolding：解锁鼠标 + 退出震动
-///
-/// 用户打开旧配置 → 看到等价的 Timeline 图，可在此基础上修改扩展。
+/// 不再有「四个阶段」——输出一张图，含 4 个 Trigger 入口节点（轻点/进入保持/每帧/退出保持），
+/// 各阶段原逻辑垂直堆叠，入口节点连到对应 Trigger。用户可在图上自由连线扩展。
 public enum TimelineMigrator {
 
-    /// 生成 4 条 Timeline（v2 配置的等价图）
+    /// 一个逻辑块的产物（节点 + 内部边 + 入口节点）
+    private typealias Block = (nodes: [NodeConfig], edges: [Edge], entries: [UUID])
+
+    /// 生成单张节点图（等价 v2 配置的全部行为）
     /// - Parameters:
-    ///   - regionID / eventID: 手势绑定（非 nil 时在 onFirstTap 图生成 RegionRef/EventRef 节点）
+    ///   - regionID / eventID: 手势绑定（非 nil 时生成 RegionRef/EventRef 节点）
     public static func migrate(pipeline: LegacyPipelineConfig, event: EventConfig,
-                               regionID: UUID? = nil, eventID: UUID? = nil) -> [TimelineConfig] {
-        var timelines: [TimelineConfig] = []
-        timelines.append(buildRecognizeTimeline(pipeline, regionID: regionID, eventID: eventID))
-        timelines.append(buildEnterTimeline(pipeline))
-        timelines.append(buildTickTimeline(pipeline, event: event))
-        timelines.append(buildExitTimeline(pipeline))
-        return timelines
+                               regionID: UUID? = nil, eventID: UUID? = nil) -> TimelineConfig {
+        let blocks: [(trigger: TriggerEvent, block: Block, dy: Double)] = [
+            (.onFirstTap,      buildRecognizeBlock(pipeline, regionID: regionID, eventID: eventID), 0),
+            (.onEnterHolding,  buildEnterBlock(pipeline), 400),
+            (.onTick,          buildTickBlock(pipeline, event: event), 800),
+            (.onExitHolding,   buildExitBlock(pipeline), 1200),
+        ]
+
+        var nodes: [NodeConfig] = []
+        var edges: [Edge] = []
+        var entries: [UUID] = []
+
+        for item in blocks {
+            // Trigger 入口节点（引擎执行时机）
+            let trigger = NodeConfig(
+                type: .trigger,
+                params: NodeParams(trigger: item.trigger),
+                x: -240, y: item.dy + 20,
+                title: item.trigger.displayName
+            )
+            nodes.append(trigger)
+            entries.append(trigger.id)
+
+            // 块内节点垂直堆叠
+            for var node in item.block.nodes {
+                node.y += item.dy
+                nodes.append(node)
+            }
+            edges.append(contentsOf: item.block.edges)
+
+            // 块入口连到 Trigger
+            for entryID in item.block.entries {
+                edges.append(Edge(from: PortID(nodeID: trigger.id, portName: "output"),
+                                  to: PortID(nodeID: entryID, portName: "input")))
+            }
+        }
+
+        return TimelineConfig(trigger: .onFirstTap, nodes: nodes, edges: edges, entryNodeIDs: entries)
     }
 
     // MARK: - onFirstTap（触发识别 + 绑定引用）
 
-    private static func buildRecognizeTimeline(_ p: LegacyPipelineConfig,
-                                               regionID: UUID?, eventID: UUID?) -> TimelineConfig {
+    private static func buildRecognizeBlock(_ p: LegacyPipelineConfig,
+                                            regionID: UUID?, eventID: UUID?) -> Block {
         var nodes: [NodeConfig] = []
         var entries: [UUID] = []
 
-        // 1. RegionRefNode：手势绑定的触发区域
+        // RegionRefNode：手势绑定的触发区域
         if let regionID {
             let node = NodeConfig(
                 type: .region,
@@ -96,7 +125,7 @@ public enum TimelineMigrator {
             entries.append(node.id)
         }
 
-        // 2. EventRefNode：手势绑定的事件
+        // EventRefNode：手势绑定的事件
         if let eventID {
             let node = NodeConfig(
                 type: .event,
@@ -107,7 +136,7 @@ public enum TimelineMigrator {
             entries.append(node.id)
         }
 
-        // 3. RecognizeNode：轻点识别参数
+        // RecognizeNode：轻点识别参数
         let recognize = NodeConfig(
             type: .recognize,
             params: NodeParams(
@@ -121,17 +150,16 @@ public enum TimelineMigrator {
         nodes.append(recognize)
         entries.append(recognize.id)
 
-        return TimelineConfig(trigger: .onFirstTap, nodes: nodes, edges: [], entryNodeIDs: entries)
+        return (nodes, [], entries)
     }
 
     // MARK: - onEnterHolding
 
-    private static func buildEnterTimeline(_ p: LegacyPipelineConfig) -> TimelineConfig {
+    private static func buildEnterBlock(_ p: LegacyPipelineConfig) -> Block {
         var nodes: [NodeConfig] = []
-        let edges: [Edge] = []
         var entries: [UUID] = []
 
-        // 1. BaselineNode：记录进入时的原始信号值（key: "startRaw"）
+        // BaselineNode：记录进入时的原始信号值（key: "startRaw"）
         let baseline = NodeConfig(
             type: .baseline,
             params: NodeParams(source: p.signalSource, key: "startRaw"),
@@ -140,7 +168,7 @@ public enum TimelineMigrator {
         nodes.append(baseline)
         entries.append(baseline.id)
 
-        // 2. MouseNode：锁定光标（若配置了解除关联）
+        // MouseNode：锁定光标（若配置了解除关联）
         if p.disassociateMouse {
             let mouse = NodeConfig(
                 type: .mouse,
@@ -148,9 +176,10 @@ public enum TimelineMigrator {
                 x: 0, y: 60, title: "锁定光标"
             )
             nodes.append(mouse)
+            entries.append(mouse.id)
         }
 
-        // 3. HapticNode：进入震动
+        // HapticNode：进入震动
         if p.hapticEnter.enabled {
             let haptic = NodeConfig(
                 type: .haptic,
@@ -163,14 +192,15 @@ public enum TimelineMigrator {
                 x: 0, y: 120, title: "进入震动"
             )
             nodes.append(haptic)
+            entries.append(haptic.id)
         }
 
-        return TimelineConfig(trigger: .onEnterHolding, nodes: nodes, edges: edges, entryNodeIDs: entries)
+        return (nodes, [], entries)
     }
 
     // MARK: - onTick（核心调节链路）
 
-    private static func buildTickTimeline(_ p: LegacyPipelineConfig, event: EventConfig) -> TimelineConfig {
+    private static func buildTickBlock(_ p: LegacyPipelineConfig, event: EventConfig) -> Block {
         var nodes: [NodeConfig] = []
         var edges: [Edge] = []
         var entries: [UUID] = []
@@ -267,14 +297,13 @@ public enum TimelineMigrator {
         ))
         connect(PortID(nodeID: branch, portName: "false"), PortID(nodeID: freeze, portName: "input"))
 
-        return TimelineConfig(trigger: .onTick, nodes: nodes, edges: edges, entryNodeIDs: entries)
+        return (nodes, edges, entries)
     }
 
     // MARK: - onExitHolding
 
-    private static func buildExitTimeline(_ p: LegacyPipelineConfig) -> TimelineConfig {
+    private static func buildExitBlock(_ p: LegacyPipelineConfig) -> Block {
         var nodes: [NodeConfig] = []
-        let edges: [Edge] = []
         var entries: [UUID] = []
 
         if p.disassociateMouse {
@@ -302,6 +331,6 @@ public enum TimelineMigrator {
             entries.append(haptic.id)
         }
 
-        return TimelineConfig(trigger: .onExitHolding, nodes: nodes, edges: edges, entryNodeIDs: entries)
+        return (nodes, [], entries)
     }
 }

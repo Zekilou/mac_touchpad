@@ -607,6 +607,7 @@ public struct GestureConfig: ... {
 | **M4-C1：Timeline 数据层 UI** | 迁移预览（3 条图节点/边/端口列表）+ 节点属性面板 + 拓扑验证状态；Canvas 画布留待 M4-C2 | Views/Timeline/ + GestureTabView 卡片 | 小 | **✓ 已完成**（2026-08-01，91 tests 通过）|
 | **M4-C2：Canvas 画布** | SwiftUI Canvas 自绘：节点拖拽/端口连线/缩放平移/工具箱面板 | Views/TimelineCanvas/ | 大（2-3天）| **✓ 已完成**（2026-08-01，91 tests 通过）|
 | **M7/v4：绑定节点化** | 绑定事件/区域也进图（EventRef/RegionRef 节点），页面只剩一张画布；波形对照并入参数面板 | NodeType.region/event + GestureTabView 单卡 | 小 | **✓ 已完成**（2026-08-01，94 tests 通过）|
+| **M8/v5：完全配置化单图** | 4 条阶段图合并为 1 张自由节点图；Trigger 节点作执行入口；批注组框；画布盛满窗口 + overlay 左侧栏 + 触控板平移缩放 | GestureConfig.timeline 单图 + GraphEvaluator 入口可达集 + TimelineGraphView | 大 | **✓ 已完成**（2026-08-01，95 tests 通过）|
 | **M5：高级节点** | Derivative/Integral 微积分类节点、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 新增节点类型 + PredicateEditor 视图 | 中等 | 待办 |
 | **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | DebugMode + TimelineDebugView | 大 | 待办 |
 
@@ -671,6 +672,16 @@ public struct GestureConfig: ... {
 4. **UI**：GestureTabView 删除 绑定事件/触发区域/波形对照 三张卡片，只剩「手势节点图」单卡；NodeParamsEditorView 支持 UUID Picker（eventID→事件名列表 / regionID→区域名列表）+ waveform 行内联手感描述；NodePaletteView/TimelineEditorSection 透传 events/regions；删除 HapticWaveformReference.swift
 5. 测试：+2（ref 节点生成、v1 迁移绑定落图断言改为 bound 属性），总 94 tests 通过
 6. 注：旧 v3 config.json（顶层有 regionID/eventID 但图上无 ref 节点）解码后 bound 属性回退顶层字段，行为不变；保存后图上仍无 ref 节点（不强制迁移），如需彻底迁移可加 normalize 步骤
+
+### v5 完全配置化（单图，2026-08-01 完成，95 tests 通过）
+用户关键纠正：「不存在四个阶段，这四个阶段是概念上的」——把 4 条独立阶段图合并为 **1 张完全自由的节点图**；组只是批注框；手势名是图的名字（不加主节点）。
+1. **数据模型**：NodeType 新增 .trigger（触发入口，params.trigger: TriggerEvent）/ .group（批注组，params.groupWidth/groupHeight + label 标题）；NodeParams 新增 trigger/groupWidth/groupHeight + setting 写入
+2. **GestureConfig**：timelines:[TimelineConfig] → timeline:TimelineConfig（单图）；自定义 Codable——decode 优先 timeline，旧 v3 timelines 数组自动 mergeTimelines 合并（每阶段补 Trigger 入口节点 + 阶段垂直堆叠 y=0/400/800/1200 + 入口连 Trigger）；encode 只写 timeline；便捷属性（识别/绑定/信号源/量化）全部改从单图读；ensureBindingsInGraph 适配单图
+3. **迁移器**：migrate 返回单张 TimelineConfig——4 个 Trigger 节点 + 各阶段节点垂直堆叠 + 入口连到 Trigger（enter 块 mouse/haptic 也加为入口）
+4. **引擎**：GraphEvaluator.evaluate 增加 entryIDs 参数——BFS 入口可达集，只执行从 Trigger 出发可达的链（不同 Trigger 互不干扰）；TimelineRuntime 单图化（init?(timeline:) 可失败），handle(event) 找图上 params.trigger==event 的节点作入口；NodeExecutors .trigger 输出 unit 激活下游（关键：有入边无数据→跳过语义下 trigger 必须有输出否则整链冻结）；.group 纯结构
+5. **UI**：GestureTabView = 整窗 TimelineGraphView（画布盛满窗口，无卡片包裹）；TimelineCanvasView 单图化（Trigger 黄色强调卡片、Group 渲染虚线批注框 + 拖拽整体移动框内节点 + 删除；Delete 删节点及其边）；NodePaletteView 改 overlay 悬浮左侧栏（.ultraThinMaterial 半透明 + 阴影，onFit 回调）；ScrollWheelCatcher（NSViewRepresentable 捕获 scrollWheel）两指滑动平移 pan -= delta；MagnifyGesture 捏合缩放；TimelineEditorSection 删除；NodeParamsEditorView 加 TriggerEvent 枚举 Picker
+6. 测试：TimelineMigratorTests 重写为单图断言（4 trigger/入口连线/参数透传/开关跟随）；TimelineRuntimeTests 构造改单图；ConfigMigrationTests 改单图断言 + v3 数组合并测试；95 tests 通过
+7. 教训：GraphEvaluator 入口可达集必须 reduce/formUnion（不能 map 成数组）；Trigger 节点必须输出 unit（否则"有入边无数据→跳过"导致整链冻结）
 
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)

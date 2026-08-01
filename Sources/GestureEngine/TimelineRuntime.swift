@@ -1,49 +1,56 @@
 import Foundation
 
-/// Timeline 运行时：一个手势的全部触发时间线 + 共享状态
-/// - 按 TriggerEvent 路由到对应 GraphEvaluator
-/// - stateStore 跨 Timeline 共享（如 enter 记录的 "startRaw" 供 tick 的 absolute 变换读取）
+/// Timeline 运行时：一张自由节点图 + 共享状态（v5 完全配置化）
+/// - 引擎按 Trigger 节点路由：handle(event) 找出图上 params.trigger == event 的节点作为入口，
+///   GraphEvaluator 只执行该入口可达的链
+/// - stateStore 跨 Trigger 共享（如 enter 记录的 "startRaw" 供 tick 的 absolute 变换读取）
 public final class TimelineRuntime {
     public typealias StateStore = [String: NodeValue]
 
-    /// 跨 Timeline 共享状态
+    /// 跨 Trigger 共享状态
     public private(set) var state: StateStore = [:]
     /// 副作用派发目标（引擎实现：震动/调节/鼠标/冻结）
     public let effects: TimelineEffects
 
-    private var evaluators: [TriggerEvent: GraphEvaluator]
+    private let evaluator: GraphEvaluator
+    private let timeline: TimelineConfig
 
-    /// - Parameter timelines: 一个手势的全部 Timeline（通常来自 TimelineMigrator 或用户配置）
+    /// - Parameter timeline: 手势的单张节点图
     /// - Parameter effects: 副作用实现
-    public init(timelines: [TimelineConfig], effects: TimelineEffects) {
+    /// - Returns: 图有环/悬挂边时返回 nil
+    public init?(timeline: TimelineConfig, effects: TimelineEffects) {
+        guard let evaluator = GraphEvaluator(timeline: timeline) else { return nil }
         self.effects = effects
-        var evals: [TriggerEvent: GraphEvaluator] = [:]
-        for timeline in timelines {
-            if let evaluator = GraphEvaluator(timeline: timeline) {
-                evals[timeline.trigger] = evaluator
-            }
-        }
-        self.evaluators = evals
+        self.evaluator = evaluator
+        self.timeline = timeline
     }
 
     /// 触发一次事件（如 onEnterHolding / onTick / onExitHolding）
     public func handle(_ event: TriggerEvent, frame: FrameContext) {
-        evaluators[event]?.evaluate(frame: frame, state: &state, effects: effects)
+        let entries = timeline.nodes
+            .filter { $0.type == .trigger && $0.params.trigger == event }
+            .map(\.id)
+        guard !entries.isEmpty else { return }
+        evaluator.evaluate(frame: frame, state: &state, effects: effects, entryIDs: entries)
     }
 
-    /// 是否存在该触发事件的时间线
+    /// 图上是否存在该触发事件
     public func hasTimeline(for event: TriggerEvent) -> Bool {
-        evaluators[event] != nil
+        timeline.nodes.contains { $0.type == .trigger && $0.params.trigger == event }
     }
 
-    /// 全部时间线的触发事件列表
+    /// 图上全部 Trigger 事件列表
     public var triggers: [TriggerEvent] {
-        Array(evaluators.keys)
+        var set = Set<TriggerEvent>()
+        for node in timeline.nodes where node.type == .trigger {
+            if let t = node.params.trigger { set.insert(t) }
+        }
+        return Array(set)
     }
 
     /// 重置跨帧状态（新手势开始时调用）
     public func reset() {
         state.removeAll(keepingCapacity: true)
-        evaluators.values.forEach { $0.reset() }
+        evaluator.reset()
     }
 }

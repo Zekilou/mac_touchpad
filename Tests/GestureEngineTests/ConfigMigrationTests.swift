@@ -27,10 +27,13 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(v3.regions.count, 2)
         XCTAssertEqual(v3.gestures.count, 2)
         XCTAssertEqual(v3.events.count, 2)
-        // 每个手势都迁移出了 4 条 Timeline（识别 + 执行）
+        // 每个手势都迁移出了单张图，含 4 个 Trigger 入口
         for gesture in v3.gestures {
-            XCTAssertEqual(gesture.timelines.map(\.trigger),
-                           [.onFirstTap, .onEnterHolding, .onTick, .onExitHolding])
+            let triggers = gesture.timeline.nodes
+                .filter { $0.type == .trigger }
+                .compactMap { $0.params.trigger }
+            XCTAssertEqual(Set(triggers),
+                           Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
         }
     }
 
@@ -65,13 +68,13 @@ final class ConfigMigrationTests: XCTestCase {
         let v1 = try JSONDecoder().decode(ConfigStore.V1Config.self, from: v1Data)
         let v3 = ConfigStore.migrate(v1: v1)
 
-        // stepNorm 迁移到 onTick 图的 quantize 节点
+        // stepNorm 迁移到图的 quantize 节点
         let rightGesture = v3.gestures.first { $0.name == "右侧" }!
-        let rightQuantize = rightGesture.timeline(for: .onTick)?.firstNode(of: .quantize)
+        let rightQuantize = rightGesture.timeline.firstNode(of: .quantize)
         XCTAssertEqual(rightQuantize?.params.stepNorm, 0.025)
 
         let leftGesture = v3.gestures.first { $0.name == "左侧" }!
-        let leftQuantize = leftGesture.timeline(for: .onTick)?.firstNode(of: .quantize)
+        let leftQuantize = leftGesture.timeline.firstNode(of: .quantize)
         XCTAssertEqual(leftQuantize?.params.stepNorm, 0.018)
     }
 
@@ -81,7 +84,7 @@ final class ConfigMigrationTests: XCTestCase {
         let v3 = ConfigStore.migrate(v1: v1)
 
         let rightGesture = v3.gestures.first { $0.name == "右侧" }!
-        let recognize = rightGesture.timeline(for: .onFirstTap)?.firstNode(of: .recognize)
+        let recognize = rightGesture.timeline.firstNode(of: .recognize)
         XCTAssertEqual(recognize?.params.tapMaxDuration, 0.2)
         XCTAssertEqual(recognize?.params.tapMaxGap, 0.3)
         XCTAssertEqual(recognize?.params.holdMinDuration, 0.2)
@@ -97,10 +100,9 @@ final class ConfigMigrationTests: XCTestCase {
         let leftGesture = v3.gestures.first { $0.name == "左侧" }!
         let leftRegion = v3.regions[0]
         let brightness = v3.events.first { $0.actionType == .brightness }!
-        // 绑定写入 onFirstTap 图的 ref 节点（图权威）
-        let leftTap = leftGesture.timeline(for: .onFirstTap)!
-        XCTAssertEqual(leftTap.firstNode(of: .region)?.params.regionID, leftRegion.id)
-        XCTAssertEqual(leftTap.firstNode(of: .event)?.params.eventID, brightness.id)
+        // 绑定写入图的 ref 节点（图权威）
+        XCTAssertEqual(leftGesture.timeline.firstNode(of: .region)?.params.regionID, leftRegion.id)
+        XCTAssertEqual(leftGesture.timeline.firstNode(of: .event)?.params.eventID, brightness.id)
         // bound 属性从图读取
         XCTAssertEqual(leftGesture.boundRegionID, leftRegion.id)
         XCTAssertEqual(leftGesture.boundEventID, brightness.id)
@@ -124,20 +126,19 @@ final class ConfigMigrationTests: XCTestCase {
         let regionID = UUID()
         let eventID = UUID()
         var gesture = GestureConfig(name: "旧", regionID: regionID, eventID: eventID,
-                                    timelines: [TimelineConfig(
+                                    timeline: TimelineConfig(
                                         trigger: .onFirstTap,
                                         nodes: [NodeConfig(type: .recognize,
                                                            params: NodeParams(tapMaxDuration: 0.2))],
                                         entryNodeIDs: [])
-                                    ])
+                                    )
         // 顶层绑定字段仍回退可用
         XCTAssertEqual(gesture.boundRegionID, regionID)
         XCTAssertEqual(gesture.boundEventID, eventID)
 
         gesture.ensureBindingsInGraph()
-        let tap = gesture.timeline(for: .onFirstTap)!
-        XCTAssertEqual(tap.firstNode(of: .region)?.params.regionID, regionID)
-        XCTAssertEqual(tap.firstNode(of: .event)?.params.eventID, eventID)
+        XCTAssertEqual(gesture.timeline.firstNode(of: .region)?.params.regionID, regionID)
+        XCTAssertEqual(gesture.timeline.firstNode(of: .event)?.params.eventID, eventID)
         // 顶层字段已清空，图成为唯一来源
         XCTAssertNil(gesture.regionID)
         XCTAssertNil(gesture.eventID)
@@ -145,7 +146,51 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(gesture.boundEventID, eventID)
         // 幂等：再跑一次不重复加节点
         gesture.ensureBindingsInGraph()
-        XCTAssertEqual(tap.nodes.filter { $0.type == .region }.count, 1)
-        XCTAssertEqual(tap.nodes.filter { $0.type == .event }.count, 1)
+        XCTAssertEqual(gesture.timeline.nodes.filter { $0.type == .region }.count, 1)
+        XCTAssertEqual(gesture.timeline.nodes.filter { $0.type == .event }.count, 1)
+    }
+
+    /// v3 旧 JSON（timelines 数组）→ 自动合并为单图（每个阶段补 Trigger 入口）
+    func testV3LegacyTimelinesArray_MergesIntoSingleGraph() throws {
+        // 构造 v3 旧格式 JSON（timelines 数组 + 顶层绑定）
+        struct V3Legacy: Codable {
+            let id: UUID
+            let name: String
+            let regionID: UUID
+            let eventID: UUID
+            let timelines: [TimelineConfig]
+        }
+        // v3 旧格式：4 条独立 timeline（最小结构）
+        let v3Timelines = [
+            TimelineConfig(trigger: .onFirstTap,
+                           nodes: [NodeConfig(type: .recognize,
+                                              params: NodeParams(tapMaxDuration: 0.2))],
+                           entryNodeIDs: []),
+            TimelineConfig(trigger: .onEnterHolding,
+                           nodes: [NodeConfig(type: .baseline,
+                                              params: NodeParams(key: "startRaw"))],
+                           entryNodeIDs: []),
+            TimelineConfig(trigger: .onTick,
+                           nodes: [NodeConfig(type: .signal,
+                                              params: NodeParams(source: .normY))],
+                           entryNodeIDs: []),
+            TimelineConfig(trigger: .onExitHolding,
+                           nodes: [NodeConfig(type: .mouse,
+                                              params: NodeParams(mouseMode: .unlockPosition))],
+                           entryNodeIDs: []),
+        ]
+        let legacy = V3Legacy(id: UUID(), name: "旧",
+                              regionID: UUID(), eventID: UUID(),
+                              timelines: v3Timelines)
+        let legacyData = try JSONEncoder().encode(legacy)
+        let decoded = try JSONDecoder().decode(GestureConfig.self, from: legacyData)
+        // 合并为单图：4 个 Trigger 入口 + 拓扑有效
+        let triggers = decoded.timeline.nodes.filter { $0.type == .trigger }
+        XCTAssertEqual(Set(triggers.compactMap { $0.params.trigger }),
+                       Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
+        switch TimelineGraphValidator.topologicalOrder(of: decoded.timeline) {
+        case .valid: break
+        case let result: XCTFail("合并图拓扑失败: \(result)")
+        }
     }
 }

@@ -158,7 +158,7 @@ public final class GestureEngine {
                     eventBox = EventBox(event)
                     effects.eventBox = eventBox
                     effects.resetFrame()
-                    runtime(for: gesture).handle(.onEnterHolding,
+                    runtime(for: gesture)?.handle(.onEnterHolding,
                                                  frame: FrameContext(rawSignals: rawSignals(of: f),
                                                                      now: now,
                                                                      directionRule: event.directionRule))
@@ -173,7 +173,7 @@ public final class GestureEngine {
             if !fingerStillThere(pathIdx) {
                 // 退出 → 执行 onExitHolding（解锁鼠标 + 退出震动）
                 effects.resetFrame()
-                runtime(for: gesture).handle(.onExitHolding, frame: FrameContext(now: now))
+                runtime(for: gesture)?.handle(.onExitHolding, frame: FrameContext(now: now))
                 if let box = eventBox { event = box.value }
                 eventBox = nil
                 effects.eventBox = nil
@@ -196,7 +196,7 @@ public final class GestureEngine {
                 // 执行 onTick 时间线：信号→变换→量化→消费→震动/冻结 全在图上的节点决定
                 effects.resetFrame()
                 let boundary = eventBox?.value.isAtAnyBoundary() ?? false
-                runtime(for: gesture).handle(.onTick,
+                runtime(for: gesture)?.handle(.onTick,
                                              frame: FrameContext(rawSignals: rawSignals(of: f),
                                                                  now: now,
                                                                  directionRule: event.directionRule,
@@ -219,9 +219,9 @@ public final class GestureEngine {
 
     // MARK: - Timeline 运行时
 
-    private func runtime(for gesture: GestureConfig) -> TimelineRuntime {
+    private func runtime(for gesture: GestureConfig) -> TimelineRuntime? {
         if let r = runtimes[gesture.id] { return r }
-        let r = TimelineRuntime(timelines: gesture.timelines, effects: effects)
+        guard let r = TimelineRuntime(timeline: gesture.timeline, effects: effects) else { return nil }
         runtimes[gesture.id] = r
         return r
     }
@@ -286,19 +286,5 @@ public final class GestureEngine {
             }
         }
         return nil
-    }
-}
-
-// MARK: - GestureConfig 节点图参数辅助（引擎从图提取）
-
-extension GestureConfig {
-    /// onTick 图的信号源（SignalNode.params.source）
-    var tickSignalSource: SignalSource {
-        timeline(for: .onTick)?.nodes.first { $0.type == .signal }?.params.source ?? .normY
-    }
-
-    /// onTick 图的量化步长（QuantizeNode.params.stepNorm）
-    var tickStepNorm: Float {
-        timeline(for: .onTick)?.nodes.first { $0.type == .quantize }?.params.stepNorm ?? 0.02
     }
 }

@@ -41,45 +41,54 @@ struct TimelineNodeView: View {
     let onConnectEnd: (NodeConfig, CGPoint) -> Void
 
     var body: some View {
-        ZStack {
-            // 卡片
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.background.opacity(0.9))
-                .shadow(color: .black.opacity(isSelected ? 0.25 : 0.12), radius: isSelected ? 4 : 2, y: 1)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.15),
-                                      lineWidth: isSelected ? 2 : 1)
-                )
+        // 组框由画布层渲染，不在此处画卡片
+        if node.type == .group {
+            EmptyView()
+        } else {
+            ZStack {
+                // 卡片（Trigger 节点黄色强调）
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(node.type == .trigger
+                          ? AnyShapeStyle(Color.yellow.opacity(0.15))
+                          : AnyShapeStyle(.background.opacity(0.9)))
+                    .shadow(color: .black.opacity(isSelected ? 0.25 : 0.12), radius: isSelected ? 4 : 2, y: 1)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(node.type == .trigger
+                                          ? (isSelected ? Color.yellow : Color.yellow.opacity(0.6))
+                                          : (isSelected ? Color.accentColor : Color.primary.opacity(0.15)),
+                                          lineWidth: isSelected ? 2 : 1)
+                    )
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Image(systemName: node.type.symbolName)
-                        .font(.system(size: 12))
-                        .foregroundStyle(node.type.tintColor)
-                    Text(node.title ?? node.type.displayName)
-                        .font(.caption.bold())
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Image(systemName: node.type.symbolName)
+                            .font(.system(size: 12))
+                            .foregroundStyle(node.type.tintColor)
+                        Text(node.title ?? node.type.displayName)
+                            .font(.caption.bold())
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    Text(node.paramsSummary)
+                        .font(.caption2).monospaced()
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    Spacer(minLength: 0)
                 }
-                Text(node.paramsSummary)
-                    .font(.caption2).monospaced()
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
 
-            // 端口圆点 + 连线把手（输出端口可拖拽连线）
-            HStack {
-                portDot(color: .orange, isOutput: false)
-                Spacer()
-                portDot(color: .teal, isOutput: true)
+                // 端口圆点 + 连线把手（输出端口可拖拽连线）
+                HStack {
+                    portDot(color: .orange, isOutput: false)
+                    Spacer()
+                    portDot(color: .teal, isOutput: true)
+                }
             }
+            .frame(width: TimelineCanvasMetrics.nodeWidth,
+                   height: TimelineCanvasMetrics.nodeHeight)
+            .contentShape(Rectangle())
         }
-        .frame(width: TimelineCanvasMetrics.nodeWidth,
-               height: TimelineCanvasMetrics.nodeHeight)
-        .contentShape(Rectangle())
     }
 
     /// 端口圆点：leading = 输入（橙），trailing = 输出（青，带拖拽连线把手）
