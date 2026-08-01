@@ -66,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var showDeleteAlert = false
     @Published var pendingDelete: DeleteTarget?
 
+    let permissionManager = PermissionManager()
+
     // MARK: - Init
 
     override init() {
@@ -206,8 +208,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         NSApp.setActivationPolicy(appSettings.showInDock ? .regular : .accessory)
         applyAppIcon()
 
-        // 检查辅助功能权限（媒体键模拟需要）
-        checkAccessibilityPermission()
+        // 首次启动请求权限（PermissionManager 轮询会持续检查状态）
+        if !permissionManager.accessibility.isOK {
+            permissionManager.requestAccessibility()
+        }
 
         guard mt_init() == 0 else {
             print("[ERROR] mt_init 失败")
@@ -240,28 +244,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         menu.addItem(.separator())
         menu.addItem(withTitle: L10n.tr("退出", "Quit"), action: #selector(quit), keyEquivalent: "q")
         statusItem?.menu = menu
-    }
-
-    // MARK: - 辅助功能权限（媒体键模拟需要）
-
-    /// 检查辅助功能权限，未授权时弹窗引导用户去系统设置
-    private func checkAccessibilityPermission() {
-        guard !AXIsProcessTrusted() else { return }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = L10n.tr("需要辅助功能权限", "Accessibility Permission Required")
-        alert.informativeText = L10n.tr(
-            "模拟系统媒体键（音量/亮度 HUD）需要「辅助功能」权限。\n\n请前往 系统设置 → 隐私与安全性 → 辅助功能，添加并启用 TouchpadGestures。\n\n仅使用「直接 API」模式不需要此权限。",
-            "Simulating system media keys (volume/brightness HUD) requires Accessibility permission.\n\nGo to System Settings → Privacy & Security → Accessibility, add and enable TouchpadGestures.\n\nOnly \"Direct API\" mode works without this permission."
-        )
-        alert.addButton(withTitle: L10n.tr("打开系统设置", "Open System Settings"))
-        alert.addButton(withTitle: L10n.tr("稍后", "Later"))
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            // AXIsProcessTrustedWithOptions 会触发系统弹窗，将 App 加入辅助功能列表
-            let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true]
-            AXIsProcessTrustedWithOptions(options)
-        }
     }
 
     func applyMenuBarIcon() {

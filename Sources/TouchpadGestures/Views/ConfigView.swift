@@ -56,20 +56,26 @@ struct ConfigView: View {
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 200)
             .safeAreaInset(edge: .bottom) {
-                HStack {
-                    Spacer()
-                    Button {
-                        appDelegate.showResetAllAlert = true
-                    } label: {
-                        Label(L10n.tr("重置全部", "Reset All"),
-                              systemImage: "arrow.counterclockwise")
-                            .font(.system(size: 12))
+                VStack(spacing: 6) {
+                    // 权限状态指示器（常驻）
+                    PermissionStatusBar()
+                        .environmentObject(appDelegate.permissionManager)
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            appDelegate.showResetAllAlert = true
+                        } label: {
+                            Label(L10n.tr("重置全部", "Reset All"),
+                                  systemImage: "arrow.counterclockwise")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help(L10n.tr("重置所有手势配置为默认值",
+                                     "Reset all gesture settings to defaults"))
+                        Spacer()
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help(L10n.tr("重置所有手势配置为默认值",
-                                 "Reset all gesture settings to defaults"))
-                    Spacer()
                 }
                 .padding(.vertical, 8)
             }
@@ -246,5 +252,69 @@ struct EditMenu: View {
             Label(L10n.tr("编辑", "Edit"), systemImage: "ellipsis.circle")
         }
         .help(L10n.tr("新增、重命名或删除", "Add, rename or delete"))
+    }
+}
+
+// MARK: - 权限状态指示器（侧栏常驻）
+
+struct PermissionStatusBar: View {
+    @EnvironmentObject var permManager: PermissionManager
+
+    var body: some View {
+        VStack(spacing: 4) {
+            permRow(
+                label: L10n.tr("输入监控", "Input Monitoring"),
+                status: permManager.inputMonitoring,
+                isOK: permManager.inputMonitoring.isOK,
+                action: { permManager.openInputMonitoringSettings() }
+            )
+            permRow(
+                label: L10n.tr("辅助功能", "Accessibility"),
+                status: permManager.accessibility,
+                isOK: permManager.accessibility.isOK,
+                action: { permManager.openAccessibilitySettings() }
+            )
+
+            // 媒体键测试按钮
+            if permManager.allGranted {
+                Button {
+                    SystemControl.volumeUp()
+                } label: {
+                    Label(L10n.tr("测试媒体键", "Test Media Key"),
+                          systemImage: "speaker.wave.2")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
+    private func permRow(label: String, status: PermissionStatus, isOK: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: status.symbolName)
+                    .foregroundColor(colorFor(status))
+                    .font(.system(size: 12))
+                Text(label)
+                    .font(.system(size: 11))
+                Spacer()
+                Text(status.label)
+                    .font(.system(size: 10))
+                    .foregroundColor(colorFor(status))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func colorFor(_ status: PermissionStatus) -> Color {
+        switch status {
+        case .granted: return .green
+        case .denied:  return .red
+        case .unknown: return .orange
+        }
     }
 }
