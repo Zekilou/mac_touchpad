@@ -101,6 +101,36 @@ idle → firstTapDown → firstTapUp → secondTapDown → holding → idle
 - 不追求 App Store 兼容性
 - 仅供个人使用
 
+## 短期开发计划
+
+当前版本 v1.1.0 已完成 6 阶段线性管线（M1），正在向 Timeline 可视化事件图编辑器演进。
+
+| 阶段 | 目标 | 状态 |
+|------|------|------|
+| **M1：v2 线性管线** | 信号源→变换→量化→输出→消费→震动 6 阶段全配置化 | ✅ 已完成 |
+| **M2：Timeline 数据模型** | 定义 TimelineConfig / NodeConfig / Edge / Predicate，v2 配置自动迁移为 Timeline 图 | 待办 |
+| **M3：执行引擎** | TimelineRuntime 拓扑排序 + 纯/副作用节点隔离 + 20+ 核心节点实现 | 待办 |
+| **M4：节点画布 UI** | 基于 [Graphaello](https://github.com/swhitty/Graphaello) 实现节点拖放 + 连线 + 端口类型校验 + Inspector 配置面板 | 待办 |
+| **M5：高级节点** | 微积分类节点（Derivative/Integral）、SwitchNode 多分支、MergeNode 合并、Predicate 树状编辑器 | 待办 |
+| **M6：调试工具** | dry-run 输入回放、执行路径节点闪烁、hover 查看每节点 I/O 值 | 待办 |
+
+### Timeline 事件图概念
+
+目标是实现类似 Blender 的节点式编辑器：以某个状态事件（如进入 holding）为时间起点，在时间轴上挂载不同类型的逻辑节点，条件满足时触发数据流分支和多种反馈。
+
+```
+onEnterHolding Timeline:
+  BaselineNode(normY) → MouseNode(lock) → HapticNode(enter)
+
+onTick Timeline:
+  SignalNode(normY) → TransformNode(delta) → QuantizeNode(discrete)
+    → BranchNode(atBoundary?)
+        ├─ false → ConsumeNode(volume) → HapticNode(tick)
+        └─ true  → HapticNode(boundary) → FreezeNode(reverse)
+```
+
+旧配置自动迁移为等价的 Timeline 图，用户可在此基础上修改或扩展。
+
 ## License
 
 MIT License — Copyright © 2026 @zekiwithcat
