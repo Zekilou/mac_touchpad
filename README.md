@@ -31,7 +31,8 @@
 
 - macOS 15 (Sequoia) 或更高
 - MacBook 内置触控板（MultitouchSupport.framework 兼容机型）
-- 需授予「输入监控」权限
+- 需授予「输入监控」权限（读取触控板数据）
+- 使用「系统媒体键」模式需额外授予「辅助功能」权限（模拟媒体键触发 HUD）
 
 ## 下载安装
 
@@ -40,6 +41,7 @@
 1. 前往 [Releases](https://github.com/Zekilou/mac_touchpad/releases) 下载最新版 `TouchpadGestures.app.zip`
 2. 解压后拖入「应用程序」文件夹
 3. 首次运行在「系统设置 → 隐私与安全性 → 输入监控」中授予权限
+4. 使用「系统媒体键」模式还需在「辅助功能」中添加并启用 TouchpadGestures
 
 ### 方式二：从源码构建
 
