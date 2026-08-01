@@ -630,21 +630,27 @@ public struct GestureConfig: ... {
 - config.json v1→v2 自动迁移，行为一致
 - 模型文件在 `Sources/GestureEngine/Models/`，UI 组件在 `Sources/TouchpadGestures/Views/`
 - 单元测试在 `Tests/GestureEngineTests/`（13 个测试）
-- **2026-08-01 v1.1.0 release 已重新发布**：基于 `2c9366d` 提交，包含辅助功能权限检查修复
+- **2026-08-01 v1.1.0 release 已重新发布**：基于 `2c9366d` 提交，包含以下修复
   - tag v1.1.0 打在 `2c9366d` 上
   - release 附带 `TouchpadGestures.zip`（release 构建 + ad-hoc 签名）
-  - 修复：媒体键模式需要辅助功能权限（Accessibility），App 启动时用 `AXIsProcessTrusted()` 检查并弹窗引导
-  - 修复：README 和 build_app.sh macOS 最低版本从 12.0 更正为 15.0
+  - 修复 1：modifierFlags 未设置（空 []）→ 改为 NSEvent.ModifierFlags(rawValue: 0xA00/0xB00)
+  - 修复 2：缺少辅助功能权限检查 → 新建 PermissionManager 轮询监控
+  - 修复 3：README 和 build_app.sh macOS 最低版本从 12.0 更正为 15.0
 
 ### 媒体键权限问题（2026-08-01）
 - **问题**：mediaKey 模式下音量和亮度都不生效，direct 模式下音量生效
-- **原因**：`CGEvent.post(tap: .cghidEventTap)` 发送系统媒体键事件需要**辅助功能权限**（Accessibility），不是输入监控权限（Input Monitoring）
-  - Input Monitoring：允许读取输入设备数据（触控板触摸帧）
-  - Accessibility：允许发送/控制 UI 事件（模拟媒体键、CGEvent post）
+- **原因 1**：`postMediaKey` 的 `modifierFlags` 设为空 `[]`，应为 `NSEvent.ModifierFlags(rawValue: 0xA00/0xB00)`
+  - data1 格式: `(keyType << 16) | (keyState << 8)`，keyState: 0x0A=down, 0x0B=up
+  - modifierFlags 必须与 keyState 一致，否则系统忽略事件
+- **原因 2**：`CGEvent.post(tap: .cghidEventTap)` 需要辅助功能权限（Accessibility），非输入监控
+  - Input Monitoring：读取输入设备数据（触控板触摸帧）
+  - Accessibility：发送/控制 UI 事件（模拟媒体键、CGEvent post）
   - direct 模式用 CoreAudio/IOKit API 不需要 Accessibility
-- **修复**：App 启动时调用 `AXIsProcessTrusted()` 检查，未授权时弹 NSAlert 引导用户去 系统设置 → 隐私与安全性 → 辅助功能
-  - 点击「打开系统设置」调用 `AXIsProcessTrustedWithOptions` 触发系统弹窗将 App 加入辅助功能列表
-  - 需 `import ApplicationServices`
+- **修复**：新建 PermissionManager（ObservableObject），每 2 秒轮询权限状态
+  - Input Monitoring: `IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)`
+  - Accessibility: `AXIsProcessTrusted()`
+  - 侧栏底部常驻权限状态指示器，点击跳转系统设置对应面板
+  - 两个权限均授权时显示「测试媒体键」按钮，点击发送 volumeUp 验证
 - **注意**：macOS Sequoia 上每次更新 App 后辅助功能权限会失效，需删除后重新添加
 
 ### 导航架构完全重写（2026-08-01）
