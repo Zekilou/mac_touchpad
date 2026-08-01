@@ -53,40 +53,35 @@ public enum SystemControl {
 
     /// 发送系统媒体键事件（NX_SYSDEFINED, subtype=8）
     /// 这会让系统自动调节音量/亮度并显示右上角 HUD
+    /// 需要「辅助功能」权限（Accessibility）
     private static func postMediaKey(_ keyType: Int32) {
-        // keyDown
-        let data1Down = Int((keyType << 16) | Int32(0x0A00))
-        let downEvent = NSEvent.otherEvent(
-            with: .systemDefined,
-            location: .zero,
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            subtype: 8,            // NX_SUBTYPE_AUX_CONTROL_BUTTONS
-            data1: data1Down,
-            data2: -1
-        )
-        downEvent?.cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
-
-        // keyUp
-        let data1Up = Int((keyType << 16) | Int32(0x0B00))
-        let upEvent = NSEvent.otherEvent(
-            with: .systemDefined,
-            location: .zero,
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            subtype: 8,
-            data1: data1Up,
-            data2: -1
-        )
-        upEvent?.cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
+        // data1 格式: (keyType << 16) | (keyState << 8) | keyRepeat
+        // keyState: 0x0A = keyDown, 0x0B = keyUp
+        // modifierFlags 必须与 keyState 一致，否则系统不响应
+        func post(_ key: Int32, down: Bool) {
+            let state: Int32 = down ? 0x0A : 0x0B
+            let data1 = Int((key << 16) | (state << 8))
+            let flags = NSEvent.ModifierFlags(rawValue: UInt(down ? 0xA00 : 0xB00))
+            let event = NSEvent.otherEvent(
+                with: .systemDefined,
+                location: .zero,
+                modifierFlags: flags,
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                subtype: 8,            // NX_SUBTYPE_AUX_CONTROL_BUTTONS
+                data1: data1,
+                data2: -1
+            )
+            event?.cgEvent?.post(tap: CGEventTapLocation.cghidEventTap)
+        }
+        post(keyType, down: true)   // keyDown
+        post(keyType, down: false)  // keyUp
     }
 
     // NX_KEYTYPE constants (from IOKit/hidsystem/ev_keymap.h)
-    // 0 = VOLUME_UP, 1 = VOLUME_DOWN, 2 = BRIGHTNESS_UP, 3 = BRIGHTNESS_DOWN
+    // 0 = NX_KEYTYPE_SOUND_UP, 1 = NX_KEYTYPE_SOUND_DOWN
+    // 2 = NX_KEYTYPE_BRIGHTNESS_UP, 3 = NX_KEYTYPE_BRIGHTNESS_DOWN
 
     public static func volumeUp()    { postMediaKey(0) }
     public static func volumeDown()  { postMediaKey(1) }
