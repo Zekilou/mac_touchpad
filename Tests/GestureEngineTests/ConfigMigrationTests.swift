@@ -18,15 +18,20 @@ final class ConfigMigrationTests: XCTestCase {
         return json.data(using: .utf8)!
     }
 
-    func testV1Migration_producesV2Structure() throws {
+    func testV1Migration_producesV3Structure() throws {
         let v1Data = try makeV1JSON()
         let v1 = try JSONDecoder().decode(ConfigStore.V1Config.self, from: v1Data)
-        let v2 = ConfigStore.migrate(v1: v1)
+        let v3 = ConfigStore.migrate(v1: v1)
 
-        XCTAssertEqual(v2.version, 2)
-        XCTAssertEqual(v2.regions.count, 2)
-        XCTAssertEqual(v2.gestures.count, 2)
-        XCTAssertEqual(v2.events.count, 2)
+        XCTAssertEqual(v3.version, 3)
+        XCTAssertEqual(v3.regions.count, 2)
+        XCTAssertEqual(v3.gestures.count, 2)
+        XCTAssertEqual(v3.events.count, 2)
+        // 每个手势都迁移出了 4 条 Timeline（识别 + 执行）
+        for gesture in v3.gestures {
+            XCTAssertEqual(gesture.timelines.map(\.trigger),
+                           [.onFirstTap, .onEnterHolding, .onTick, .onExitHolding])
+        }
     }
 
     func testV1Migration_edgeThresholdsBecameRegions() throws {
@@ -55,16 +60,33 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(brightness.step, 0.015)
     }
 
-    func testV1Migration_stepNormBecameGestureSlideStep() throws {
+    func testV1Migration_stepNormLandsInTickQuantizeNode() throws {
         let v1Data = try makeV1JSON()
         let v1 = try JSONDecoder().decode(ConfigStore.V1Config.self, from: v1Data)
-        let v2 = ConfigStore.migrate(v1: v1)
+        let v3 = ConfigStore.migrate(v1: v1)
 
-        let rightGesture = v2.gestures.first { $0.name == "右侧" }!
-        XCTAssertEqual(rightGesture.stepNorm, 0.025)
+        // stepNorm 迁移到 onTick 图的 quantize 节点
+        let rightGesture = v3.gestures.first { $0.name == "右侧" }!
+        let rightQuantize = rightGesture.timeline(for: .onTick)?.firstNode(of: .quantize)
+        XCTAssertEqual(rightQuantize?.params.stepNorm, 0.025)
 
-        let leftGesture = v2.gestures.first { $0.name == "左侧" }!
-        XCTAssertEqual(leftGesture.stepNorm, 0.018)
+        let leftGesture = v3.gestures.first { $0.name == "左侧" }!
+        let leftQuantize = leftGesture.timeline(for: .onTick)?.firstNode(of: .quantize)
+        XCTAssertEqual(leftQuantize?.params.stepNorm, 0.018)
+    }
+
+    func testV1Migration_tapParamsLandsInRecognizeNode() throws {
+        let v1Data = try makeV1JSON()
+        let v1 = try JSONDecoder().decode(ConfigStore.V1Config.self, from: v1Data)
+        let v3 = ConfigStore.migrate(v1: v1)
+
+        let rightGesture = v3.gestures.first { $0.name == "右侧" }!
+        let recognize = rightGesture.timeline(for: .onFirstTap)?.firstNode(of: .recognize)
+        XCTAssertEqual(recognize?.params.tapMaxDuration, 0.2)
+        XCTAssertEqual(recognize?.params.tapMaxGap, 0.3)
+        XCTAssertEqual(recognize?.params.holdMinDuration, 0.2)
+        // 手势识别参数属性从图读取
+        XCTAssertEqual(rightGesture.tapMaxDuration, 0.2)
     }
 
     func testV1Migration_bindingsCorrect() throws {

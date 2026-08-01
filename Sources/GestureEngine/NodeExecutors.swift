@@ -28,6 +28,9 @@ public enum NodeExecutors {
             return result(.float(frame.rawSignals[p.source ?? .normY] ?? 0))
         case .value:
             return result(.float(p.constant ?? 0))
+        // 触发识别：纯参数承载（引擎状态机读取），无执行逻辑
+        case .recognize:
+            return .init()
 
         // MARK: 数学/变换
         case .transform:

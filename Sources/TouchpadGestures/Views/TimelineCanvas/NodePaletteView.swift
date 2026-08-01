@@ -36,9 +36,22 @@ struct NodePaletteView: View {
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.primary.opacity(0.05)))
 
-            if let node = selectedNode {
-                // 选中节点 Inspector
-                TimelineNodeInspector(node: node, usedPorts: ports(of: node.id))
+            if let node = selectedNode, let idx = timeline.nodes.firstIndex(where: { $0.id == node.id }) {
+                // 选中节点：标题 + 可编辑参数 + 边管理
+                HStack(spacing: 5) {
+                    Image(systemName: node.type.symbolName)
+                        .foregroundStyle(node.type.tintColor)
+                    Text(node.title ?? node.type.displayName)
+                        .font(.subheadline.bold())
+                    Spacer()
+                }
+                NodeParamsEditorView(
+                    params: Binding(
+                        get: { timeline.nodes[idx].params },
+                        set: { timeline.nodes[idx].params = $0 }
+                    ),
+                    nodeType: node.type
+                )
                 nodeEdgeList(node)
                 Divider()
             }
@@ -139,15 +152,6 @@ struct NodePaletteView: View {
             .buttonStyle(.borderless)
             .help(L10n.tr("删除连线", "Remove edge"))
         }
-    }
-
-    private func ports(of nodeID: UUID) -> Set<String> {
-        var result: Set<String> = []
-        for edge in timeline.edges {
-            if edge.from.nodeID == nodeID { result.insert(edge.from.portName) }
-            if edge.to.nodeID == nodeID { result.insert(edge.to.portName) }
-        }
-        return result
     }
 
     // MARK: - 适应画布

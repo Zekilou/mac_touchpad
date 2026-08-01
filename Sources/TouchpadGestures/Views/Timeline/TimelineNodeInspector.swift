@@ -9,6 +9,7 @@ extension NodeType {
         switch self {
         case .signal:     return "waveform.path.ecg"
         case .value:      return "number"
+        case .recognize:  return "hand.tap"
         case .transform:  return "arrow.triangle.2.circlepath"
         case .scale:      return "arrow.up.left.and.arrow.down.right"
         case .clamp:      return "rectangle.compress.vertical"
@@ -35,7 +36,7 @@ extension NodeType {
     /// 大类配色
     var tintColor: Color {
         switch self {
-        case .signal, .value:                       return .blue
+        case .signal, .value, .recognize:               return .blue
         case .transform, .scale, .clamp, .abs, .sign: return .purple
         case .quantize, .gate, .debounce:           return .orange
         case .branch, .`switch`:                    return .red
@@ -66,64 +67,5 @@ extension NodeParams {
             if mirror.displayStyle == .optional, mirror.children.isEmpty { return nil }
             return (label, String(describing: value))
         }
-    }
-}
-
-// MARK: - 节点属性面板（只读展示全部已设置参数）
-
-/// 选中节点的 Inspector：类型、标题、全部参数、端口
-struct TimelineNodeInspector: View {
-    let node: NodeConfig
-    /// 该节点在图中实际用到的端口（由边推断）
-    let usedPorts: Set<String>
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // 标题行
-            HStack(spacing: 6) {
-                Image(systemName: node.type.symbolName)
-                    .foregroundStyle(node.type.tintColor)
-                Text(node.title ?? node.type.displayName)
-                    .font(.subheadline.bold())
-                Text(node.type.displayName)
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            // 参数列表
-            let rows = node.params.nonNilRows
-            if rows.isEmpty {
-                Text(L10n.tr("（无参数）", "(no params)"))
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                ForEach(rows, id: \.0) { key, value in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(key)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 110, alignment: .leading)
-                        Text(value)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                        Spacer()
-                    }
-                }
-            }
-
-            // 端口（非空时展示）
-            if !usedPorts.isEmpty {
-                HStack(spacing: 6) {
-                    Text(L10n.tr("端口", "Ports"))
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(usedPorts.sorted().joined(separator: ", "))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(Color.primary.opacity(0.04)))
     }
 }

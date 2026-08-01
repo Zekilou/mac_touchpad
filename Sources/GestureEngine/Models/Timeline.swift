@@ -38,6 +38,8 @@ public enum TriggerEvent: String, Codable, CaseIterable {
 public enum NodeType: String, Codable, CaseIterable {
     // 数据源
     case signal, value
+    // 触发识别（状态机参数）
+    case recognize
     // 数学/变换
     case transform, scale, clamp, abs, sign
     // 量化/门控
@@ -54,6 +56,8 @@ public enum NodeType: String, Codable, CaseIterable {
         // 数据源
         case .signal:    return L10n.tr("信号源", "Signal")
         case .value:     return L10n.tr("常量值", "Value")
+        // 触发识别
+        case .recognize: return L10n.tr("触发识别", "Recognize")
         // 数学/变换
         case .transform: return L10n.tr("变换", "Transform")
         case .scale:     return L10n.tr("缩放", "Scale")
@@ -105,6 +109,11 @@ public struct NodeParams: Codable, Hashable {
     // 数据源
     public var source: SignalSource?     // signal
     public var constant: Float?          // value
+    // 触发识别（状态机参数）
+    public var tapMaxDuration: Double?   // recognize
+    public var tapMaxDrift: Float?       // recognize
+    public var tapMaxGap: Double?        // recognize
+    public var holdMinDuration: Double?  // recognize
     // 变换
     public var transform: TransformMode? // transform
     public var multiplier: Float?        // scale
@@ -144,6 +153,10 @@ public struct NodeParams: Codable, Hashable {
     /// 便捷初始化：常用参数一键填充（其余字段默认 nil）
     public init(source: SignalSource? = nil,
                 constant: Float? = nil,
+                tapMaxDuration: Double? = nil,
+                tapMaxDrift: Float? = nil,
+                tapMaxGap: Double? = nil,
+                holdMinDuration: Double? = nil,
                 transform: TransformMode? = nil,
                 multiplier: Float? = nil,
                 offset: Float? = nil,
@@ -172,6 +185,10 @@ public struct NodeParams: Codable, Hashable {
                 delayMs: Double? = nil) {
         self.source = source
         self.constant = constant
+        self.tapMaxDuration = tapMaxDuration
+        self.tapMaxDrift = tapMaxDrift
+        self.tapMaxGap = tapMaxGap
+        self.holdMinDuration = holdMinDuration
         self.transform = transform
         self.multiplier = multiplier
         self.offset = offset
@@ -199,22 +216,64 @@ public struct NodeParams: Codable, Hashable {
         self.key = key
         self.delayMs = delayMs
     }
+
+    /// 按字段名返回修改后的副本（可编辑 Inspector 通用写入）
+    /// - Returns: 若 key 未知返回原值
+    public func setting(key: String, _ value: Any?) -> NodeParams {
+        var p = self
+        switch key {
+        case "source":         p.source = value as? SignalSource
+        case "constant":       p.constant = value as? Float
+        case "tapMaxDuration": p.tapMaxDuration = value as? Double
+        case "tapMaxDrift":    p.tapMaxDrift = value as? Float
+        case "tapMaxGap":      p.tapMaxGap = value as? Double
+        case "holdMinDuration": p.holdMinDuration = value as? Double
+        case "transform":      p.transform = value as? TransformMode
+        case "multiplier":     p.multiplier = value as? Float
+        case "offset":         p.offset = value as? Float
+        case "min":            p.min = value as? Float
+        case "max":            p.max = value as? Float
+        case "stepNorm":       p.stepNorm = value as? Float
+        case "sensitivity":    p.sensitivity = value as? Float
+        case "triggerMode":    p.triggerMode = value as? TriggerMode
+        case "threshold":      p.threshold = value as? Float
+        case "comparator":     p.comparator = value as? Comparator
+        case "minIntervalMs":  p.minIntervalMs = value as? Double
+        case "predicate":      p.predicate = value as? Predicate
+        case "action":         p.action = value as? ActionType
+        case "method":         p.method = value as? ExecutionMethod
+        case "step":           p.step = value as? Float
+        case "waveform":       p.waveform = value as? Int32
+        case "count":          p.count = value as? Int
+        case "intervalUs":     p.intervalUs = value as? Int32
+        case "async":          p.async = value as? Bool
+        case "mouseMode":      p.mouseMode = value as? MouseMode
+        case "unfreeze":       p.unfreeze = value as? UnfreezeMode
+        case "timeoutMs":      p.timeoutMs = value as? Double
+        case "label":          p.label = value as? String
+        case "mergeMode":      p.mergeMode = value as? MergeMode
+        case "key":            p.key = value as? String
+        case "delayMs":        p.delayMs = value as? Double
+        default: break
+        }
+        return p
+    }
 }
 
 /// 鼠标控制模式
-public enum MouseMode: String, Codable, Hashable {
+public enum MouseMode: String, Codable, CaseIterable, Hashable {
     case lockPosition    // 锁定光标位置（holding 期间）
     case unlockPosition  // 恢复光标关联
 }
 
 /// 冻结解冻条件
-public enum UnfreezeMode: String, Codable, Hashable {
+public enum UnfreezeMode: String, Codable, CaseIterable, Hashable {
     case reverseSlide    // 反向滑动解冻（默认）
     case timeout         // 超时自动解冻
 }
 
 /// 合并模式
-public enum MergeMode: String, Codable, Hashable {
+public enum MergeMode: String, Codable, CaseIterable, Hashable {
     case sum, max, min
 }
 
@@ -296,7 +355,7 @@ public struct TimelineConfig: Codable, Identifiable, Hashable {
 
 // MARK: - Predicate（条件表达式，简化版）
 
-public enum Comparator: String, Codable, Hashable {
+public enum Comparator: String, Codable, CaseIterable, Hashable {
     case gt, gte, lt, lte, eq, neq
 
     public var symbol: String {

@@ -10,29 +10,26 @@ final class TimelineRuntimeTests: XCTestCase {
         effects = MockEffects()
     }
 
-    private func makeGesture() -> GestureConfig {
-        GestureConfig(name: "测试", regionID: UUID(), eventID: UUID())
-    }
-
     private func makeEvent() -> EventConfig {
         EventConfig(name: "音量", actionType: .volume,
                     step: 0.0125, boundaryThreshold: 0.001)
     }
 
     private func makeRuntime() -> TimelineRuntime {
-        let timelines = TimelineMigrator.migrate(gesture: makeGesture(), event: makeEvent())
+        let timelines = TimelineMigrator.migrate(pipeline: LegacyPipelineConfig(), event: makeEvent())
         return TimelineRuntime(timelines: timelines, effects: effects)
     }
 
     // MARK: - 结构
 
-    func testRuntimeLoadsThreeTriggers() {
+    func testRuntimeLoadsAllTriggers() {
         let runtime = makeRuntime()
+        XCTAssertTrue(runtime.hasTimeline(for: .onFirstTap))
         XCTAssertTrue(runtime.hasTimeline(for: .onEnterHolding))
         XCTAssertTrue(runtime.hasTimeline(for: .onTick))
         XCTAssertTrue(runtime.hasTimeline(for: .onExitHolding))
         XCTAssertEqual(Set(runtime.triggers),
-                       Set([.onEnterHolding, .onTick, .onExitHolding]))
+                       Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
     }
 
     // MARK: - 完整流程（enter → tick → exit）
@@ -115,11 +112,11 @@ final class TimelineRuntimeTests: XCTestCase {
 
     /// 关闭 disassociateMouse / hapticEnter 后 enter 时间线不产生对应副作用
     func testMigratedTimelineFollowsConfigSwitches() {
-        var gesture = makeGesture()
-        gesture.disassociateMouse = false
-        gesture.hapticEnter = HapticEvent(enabled: false, waveform: 2, count: 1, intervalUs: 0)
+        var pipeline = LegacyPipelineConfig()
+        pipeline.disassociateMouse = false
+        pipeline.hapticEnter = HapticEvent(enabled: false, waveform: 2, count: 1, intervalUs: 0)
         let runtime = TimelineRuntime(
-            timelines: TimelineMigrator.migrate(gesture: gesture, event: makeEvent()),
+            timelines: TimelineMigrator.migrate(pipeline: pipeline, event: makeEvent()),
             effects: effects)
 
         runtime.handle(.onEnterHolding,

@@ -1,31 +1,99 @@
 import Foundation
 
-/// v2 GestureConfig → [TimelineConfig] 迁移器
+// MARK: - v2 管线值对象（迁移器输入）
+
+/// v2 线性管线的全部可配置参数（迁移前 GestureConfig 的字段集合）
+/// 引擎/配置解码时从 v2 字段组装此对象 → 迁移为 Timeline 图
+public struct LegacyPipelineConfig {
+    public var signalSource: SignalSource
+    public var transformMode: TransformMode
+    public var triggerMode: TriggerMode
+    public var stepNorm: Float
+    public var sensitivity: Float
+    public var hapticEnter: HapticEvent
+    public var hapticTick: HapticEvent
+    public var hapticBoundary: HapticEvent
+    public var hapticExit: HapticEvent
+    public var disassociateMouse: Bool
+    // 触发识别参数
+    public var tapMaxDuration: Double
+    public var tapMaxDrift: Float
+    public var tapMaxGap: Double
+    public var holdMinDuration: Double
+
+    public init(signalSource: SignalSource = .normY,
+                transformMode: TransformMode = .delta,
+                triggerMode: TriggerMode = .discrete,
+                stepNorm: Float = 0.02,
+                sensitivity: Float = 1.0,
+                hapticEnter: HapticEvent = .enter,
+                hapticTick: HapticEvent = .tick,
+                hapticBoundary: HapticEvent = .boundary,
+                hapticExit: HapticEvent = .exit,
+                disassociateMouse: Bool = true,
+                tapMaxDuration: Double = 0.20,
+                tapMaxDrift: Float = 0.05,
+                tapMaxGap: Double = 0.30,
+                holdMinDuration: Double = 0.20) {
+        self.signalSource = signalSource
+        self.transformMode = transformMode
+        self.triggerMode = triggerMode
+        self.stepNorm = stepNorm
+        self.sensitivity = sensitivity
+        self.hapticEnter = hapticEnter
+        self.hapticTick = hapticTick
+        self.hapticBoundary = hapticBoundary
+        self.hapticExit = hapticExit
+        self.disassociateMouse = disassociateMouse
+        self.tapMaxDuration = tapMaxDuration
+        self.tapMaxDrift = tapMaxDrift
+        self.tapMaxGap = tapMaxGap
+        self.holdMinDuration = holdMinDuration
+    }
+}
+
+// MARK: - 迁移器
+
+/// v2 线性管线 → Timeline 图集迁移器
 ///
-/// 旧配置（信号源/变换/量化/震动散落字段）自动生成 3 条 Timeline 图：
-///   - onEnterHolding：记录基线 + 锁鼠标 + 进入震动 + 边界 HUD
+/// 生成 4 条 Timeline（等价于 v2 配置的全部行为）：
+///   - onFirstTap：触发识别（轻点参数）→ 状态机读取
+///   - onEnterHolding：记录基线 + 锁鼠标 + 进入震动
 ///   - onTick：信号→变换→量化→分支(边界?)→消费/冻结
 ///   - onExitHolding：解锁鼠标 + 退出震动
 ///
 /// 用户打开旧配置 → 看到等价的 Timeline 图，可在此基础上修改扩展。
 public enum TimelineMigrator {
 
-    /// 生成 3 条 Timeline（v2 配置的等价图）
-    /// - Parameters:
-    ///   - gesture: 手势配置（信号管线 + 触觉 + 鼠标）
-    ///   - event: 事件配置（action/method/step/directionRule）
-    /// - Returns: 按执行顺序排列的 Timeline 数组（enter → tick → exit）
-    public static func migrate(gesture: GestureConfig, event: EventConfig) -> [TimelineConfig] {
+    /// 生成 4 条 Timeline（v2 配置的等价图）
+    public static func migrate(pipeline: LegacyPipelineConfig, event: EventConfig) -> [TimelineConfig] {
         var timelines: [TimelineConfig] = []
-        timelines.append(buildEnterTimeline(gesture: gesture))
-        timelines.append(buildTickTimeline(gesture: gesture, event: event))
-        timelines.append(buildExitTimeline(gesture: gesture))
+        timelines.append(buildRecognizeTimeline(pipeline))
+        timelines.append(buildEnterTimeline(pipeline))
+        timelines.append(buildTickTimeline(pipeline, event: event))
+        timelines.append(buildExitTimeline(pipeline))
         return timelines
+    }
+
+    // MARK: - onFirstTap（触发识别）
+
+    private static func buildRecognizeTimeline(_ p: LegacyPipelineConfig) -> TimelineConfig {
+        let node = NodeConfig(
+            type: .recognize,
+            params: NodeParams(
+                tapMaxDuration: p.tapMaxDuration,
+                tapMaxDrift: p.tapMaxDrift,
+                tapMaxGap: p.tapMaxGap,
+                holdMinDuration: p.holdMinDuration
+            ),
+            x: 0, y: 0, title: "轻点识别"
+        )
+        return TimelineConfig(trigger: .onFirstTap, nodes: [node], edges: [], entryNodeIDs: [node.id])
     }
 
     // MARK: - onEnterHolding
 
-    private static func buildEnterTimeline(gesture: GestureConfig) -> TimelineConfig {
+    private static func buildEnterTimeline(_ p: LegacyPipelineConfig) -> TimelineConfig {
         var nodes: [NodeConfig] = []
         let edges: [Edge] = []
         var entries: [UUID] = []
@@ -33,14 +101,14 @@ public enum TimelineMigrator {
         // 1. BaselineNode：记录进入时的原始信号值（key: "startRaw"）
         let baseline = NodeConfig(
             type: .baseline,
-            params: NodeParams(source: gesture.signalSource, key: "startRaw"),
+            params: NodeParams(source: p.signalSource, key: "startRaw"),
             x: 0, y: 0, title: "记录起始信号"
         )
         nodes.append(baseline)
         entries.append(baseline.id)
 
         // 2. MouseNode：锁定光标（若配置了解除关联）
-        if gesture.disassociateMouse {
+        if p.disassociateMouse {
             let mouse = NodeConfig(
                 type: .mouse,
                 params: NodeParams(mouseMode: .lockPosition),
@@ -50,13 +118,13 @@ public enum TimelineMigrator {
         }
 
         // 3. HapticNode：进入震动
-        if gesture.hapticEnter.enabled {
+        if p.hapticEnter.enabled {
             let haptic = NodeConfig(
                 type: .haptic,
                 params: NodeParams(
-                    waveform: gesture.hapticEnter.waveform,
-                    count: gesture.hapticEnter.count,
-                    intervalUs: gesture.hapticEnter.intervalUs,
+                    waveform: p.hapticEnter.waveform,
+                    count: p.hapticEnter.count,
+                    intervalUs: p.hapticEnter.intervalUs,
                     async: true
                 ),
                 x: 0, y: 120, title: "进入震动"
@@ -69,7 +137,7 @@ public enum TimelineMigrator {
 
     // MARK: - onTick（核心调节链路）
 
-    private static func buildTickTimeline(gesture: GestureConfig, event: EventConfig) -> TimelineConfig {
+    private static func buildTickTimeline(_ p: LegacyPipelineConfig, event: EventConfig) -> TimelineConfig {
         var nodes: [NodeConfig] = []
         var edges: [Edge] = []
         var entries: [UUID] = []
@@ -85,7 +153,7 @@ public enum TimelineMigrator {
         // 1. SignalNode：提取信号源
         let signal = add(NodeConfig(
             type: .signal,
-            params: NodeParams(source: gesture.signalSource),
+            params: NodeParams(source: p.signalSource),
             x: 0, y: 0, title: "信号源"
         ))
         entries.append(signal)
@@ -93,7 +161,7 @@ public enum TimelineMigrator {
         // 2. TransformNode：delta/absolute
         let transform = add(NodeConfig(
             type: .transform,
-            params: NodeParams(transform: gesture.transformMode),
+            params: NodeParams(transform: p.transformMode),
             x: 200, y: 0, title: "变换"
         ))
         connect(PortID(nodeID: signal, portName: "output"), PortID(nodeID: transform, portName: "input"))
@@ -102,9 +170,9 @@ public enum TimelineMigrator {
         let quantize = add(NodeConfig(
             type: .quantize,
             params: NodeParams(
-                stepNorm: gesture.stepNorm,
-                sensitivity: gesture.sensitivity,
-                triggerMode: gesture.triggerMode
+                stepNorm: p.stepNorm,
+                sensitivity: p.sensitivity,
+                triggerMode: p.triggerMode
             ),
             x: 400, y: 0, title: "量化"
         ))
@@ -130,13 +198,13 @@ public enum TimelineMigrator {
         ))
         connect(PortID(nodeID: branch, portName: "true"), PortID(nodeID: consume, portName: "input"))
 
-        if gesture.hapticTick.enabled {
+        if p.hapticTick.enabled {
             let haptic = add(NodeConfig(
                 type: .haptic,
                 params: NodeParams(
-                    waveform: gesture.hapticTick.waveform,
-                    count: gesture.hapticTick.count,
-                    intervalUs: gesture.hapticTick.intervalUs,
+                    waveform: p.hapticTick.waveform,
+                    count: p.hapticTick.count,
+                    intervalUs: p.hapticTick.intervalUs,
                     async: true
                 ),
                 x: 1000, y: -80, title: "刻度震动"
@@ -145,13 +213,13 @@ public enum TimelineMigrator {
         }
 
         // 6. false 分支：首次到达边界 → 边界震动 + 冻结
-        if gesture.hapticBoundary.enabled {
+        if p.hapticBoundary.enabled {
             let haptic = add(NodeConfig(
                 type: .haptic,
                 params: NodeParams(
-                    waveform: gesture.hapticBoundary.waveform,
-                    count: gesture.hapticBoundary.count,
-                    intervalUs: gesture.hapticBoundary.intervalUs,
+                    waveform: p.hapticBoundary.waveform,
+                    count: p.hapticBoundary.count,
+                    intervalUs: p.hapticBoundary.intervalUs,
                     async: true
                 ),
                 x: 800, y: 80, title: "边界震动"
@@ -171,12 +239,12 @@ public enum TimelineMigrator {
 
     // MARK: - onExitHolding
 
-    private static func buildExitTimeline(gesture: GestureConfig) -> TimelineConfig {
+    private static func buildExitTimeline(_ p: LegacyPipelineConfig) -> TimelineConfig {
         var nodes: [NodeConfig] = []
         let edges: [Edge] = []
         var entries: [UUID] = []
 
-        if gesture.disassociateMouse {
+        if p.disassociateMouse {
             let mouse = NodeConfig(
                 type: .mouse,
                 params: NodeParams(mouseMode: .unlockPosition),
@@ -186,13 +254,13 @@ public enum TimelineMigrator {
             entries.append(mouse.id)
         }
 
-        if gesture.hapticExit.enabled {
+        if p.hapticExit.enabled {
             let haptic = NodeConfig(
                 type: .haptic,
                 params: NodeParams(
-                    waveform: gesture.hapticExit.waveform,
-                    count: gesture.hapticExit.count,
-                    intervalUs: gesture.hapticExit.intervalUs,
+                    waveform: p.hapticExit.waveform,
+                    count: p.hapticExit.count,
+                    intervalUs: p.hapticExit.intervalUs,
                     async: true
                 ),
                 x: 0, y: 60, title: "退出震动"

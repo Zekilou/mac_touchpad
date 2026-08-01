@@ -17,19 +17,9 @@ struct HapticWaveformReference: View {
     ]
 
     private func usageLabel(id: Int32) -> String {
-        var usages: [String] = []
-        if gesture.hapticEnter.enabled && gesture.hapticEnter.waveform == id {
-            usages.append(L10n.tr("进入反馈", "Enter"))
-        }
-        if gesture.hapticTick.enabled && gesture.hapticTick.waveform == id {
-            usages.append(L10n.tr("滑动刻度", "Tick"))
-        }
-        if gesture.hapticBoundary.enabled && gesture.hapticBoundary.waveform == id {
-            usages.append(L10n.tr("边界震动", "Boundary"))
-        }
-        if gesture.hapticExit.enabled && gesture.hapticExit.waveform == id {
-            usages.append(L10n.tr("退出反馈", "Exit"))
-        }
+        let usages = gesture.hapticNodes
+            .filter { $0.params.waveform == id }
+            .map(\.label)
         return usages.isEmpty ? "—" : usages.joined(separator: " / ")
     }
 

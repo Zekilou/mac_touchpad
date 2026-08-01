@@ -653,6 +653,15 @@ public struct GestureConfig: ... {
 5. 教训：`Edge` 与 SwiftUI.Edge 同名冲突 → `import struct GestureEngine.Edge` 消歧（同 Predicate 的 M2 方案）
 6. 待办：画布编辑的图接 GestureConfig.timelines 持久化 + 引擎切换（M7）；参数可编辑 Inspector（M4-C3）；节点右键菜单/端口类型校验
 
+### v3 节点化（M7，2026-08-01 完成，93 tests 通过）
+用户确认「整个手势页面节点化 + 编辑即生效」：手势全部行为参数（识别/信号/触觉/鼠标）在节点图上编辑并驱动实际行为。
+1. **数据层**：GestureConfig v3 = id/name/regionID/eventID/timelines（4 条图：onFirstTap 识别 + onEnterHolding/onTick/onExitHolding 执行）；新增 NodeType.recognize + NodeParams 4 个识别参数（tapMaxDuration/tapMaxDrift/tapMaxGap/holdMinDuration）；新增 LegacyPipelineConfig（v2 管线值对象）；TimelineMigrator.migrate(pipeline:event:) 生成 4 条图；NodeParams.setting(key:value:) 通用字段写入
+2. **迁移**：ConfigStore 三层 load()：v3 → AppConfigV2（GestureConfigV2 解码 v2 含内部 v1 迁移）→ V1Config；migrate(v2:) 把每个 v2 手势 + 对应 event 迁移为图集
+3. **引擎**：GestureEngine 状态机识别参数从 RecognizeNode 读取（gesture.tapMaxDuration 等 extension）；holding 流程切换 TimelineRuntime（enter 建立 runtime+EventBox，tick 每帧执行+freeze 请求应用，exit 同步 trackedValue）；EngineEffects 桥接（haptic/consume/mouse/freeze，freezeRequested 帧标志）；tickSignalSource/tickStepNorm 从 onTick 图提取
+4. **UI**：GestureTabView = 绑定卡片 + 「手势节点图」画布编辑器主体 + 波形对照（从图读）；TimelineEditorSection（4 条图 trigger 切换 + 画布 + 侧栏，编辑实时写回 config）；NodeParamsEditorView（可编辑参数面板：数值 TextField/Stepper、开关、枚举 Picker，写入 NodeParams.setting）；删除 TimelinePreviewView/只读 Inspector
+5. 新增测试：recognize 参数迁移、4 条图结构、v1→v3 stepNorm/识别参数落图；总 93 tests 通过
+6. 教训：`Edge`/`Comparator`/`Predicate` 与系统同名类型冲突需 `import struct/enum GestureEngine.X` 消歧；NodeParams 便捷 init 参数必须按声明顺序
+
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
 - 状态机从 leftState/rightState 改为 `[UUID: GestureState]` 字典，每帧遍历所有手势
