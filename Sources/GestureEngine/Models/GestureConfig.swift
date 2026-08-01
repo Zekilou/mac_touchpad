@@ -64,6 +64,33 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         refNode(of: .event)?.params.eventID ?? eventID
     }
 
+    /// 旧 v3 文件迁移：把顶层 regionID/eventID 补入 onFirstTap 图的 ref 节点（缺失时），并清空顶层字段。
+    /// 之后图是唯一事实来源，保存的 JSON 不再含顶层绑定。
+    public mutating func ensureBindingsInGraph() {
+        guard let idx = timelines.firstIndex(where: { $0.trigger == .onFirstTap }) else { return }
+        var tl = timelines[idx]
+        var didChange = false
+        if let regionID, tl.firstNode(of: .region) == nil {
+            let node = NodeConfig(type: .region, params: NodeParams(regionID: regionID),
+                                  x: 0, y: 0, title: "触发区域")
+            tl.nodes.append(node)
+            tl.entryNodeIDs.append(node.id)
+            didChange = true
+        }
+        if let eventID, tl.firstNode(of: .event) == nil {
+            let node = NodeConfig(type: .event, params: NodeParams(eventID: eventID),
+                                  x: 200, y: 0, title: "绑定事件")
+            tl.nodes.append(node)
+            tl.entryNodeIDs.append(node.id)
+            didChange = true
+        }
+        if didChange {
+            timelines[idx] = tl
+            regionID = nil
+            eventID = nil
+        }
+    }
+
     // MARK: - 识别参数（从 onFirstTap 图的 RecognizeNode 提取）
 
     public var recognizeParams: NodeParams? {

@@ -57,8 +57,18 @@ public enum ConfigStore {
         guard let data = try? Data(contentsOf: configURL) else {
             return AppConfig()
         }
-        // 先尝试 v3（当前格式）
-        if let cfg = try? JSONDecoder().decode(AppConfig.self, from: data) {
+        // 先尝试 v3（当前格式）；旧 v3 文件顶层绑定补入图并保存（图成为唯一事实来源）
+        if var cfg = try? JSONDecoder().decode(AppConfig.self, from: data) {
+            var didChange = false
+            for i in cfg.gestures.indices {
+                var gesture = cfg.gestures[i]
+                gesture.ensureBindingsInGraph()
+                if gesture != cfg.gestures[i] {
+                    cfg.gestures[i] = gesture
+                    didChange = true
+                }
+            }
+            if didChange { save(cfg) }
             return cfg
         }
         // v2 迁移

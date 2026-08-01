@@ -117,4 +117,35 @@ final class ConfigMigrationTests: XCTestCase {
         let decoded = try JSONDecoder().decode(AppConfig.self, from: data)
         XCTAssertEqual(original, decoded)
     }
+
+    /// 旧 v3 文件（顶层有绑定、图上无 ref 节点）→ ensureBindingsInGraph 补入图并清空顶层
+    func testEnsureBindingsInGraph_BackfillsLegacyTopLevel() throws {
+        // 构造旧 v3 手势：顶层绑定 + 图上仅 recognize
+        let regionID = UUID()
+        let eventID = UUID()
+        var gesture = GestureConfig(name: "旧", regionID: regionID, eventID: eventID,
+                                    timelines: [TimelineConfig(
+                                        trigger: .onFirstTap,
+                                        nodes: [NodeConfig(type: .recognize,
+                                                           params: NodeParams(tapMaxDuration: 0.2))],
+                                        entryNodeIDs: [])
+                                    ])
+        // 顶层绑定字段仍回退可用
+        XCTAssertEqual(gesture.boundRegionID, regionID)
+        XCTAssertEqual(gesture.boundEventID, eventID)
+
+        gesture.ensureBindingsInGraph()
+        let tap = gesture.timeline(for: .onFirstTap)!
+        XCTAssertEqual(tap.firstNode(of: .region)?.params.regionID, regionID)
+        XCTAssertEqual(tap.firstNode(of: .event)?.params.eventID, eventID)
+        // 顶层字段已清空，图成为唯一来源
+        XCTAssertNil(gesture.regionID)
+        XCTAssertNil(gesture.eventID)
+        XCTAssertEqual(gesture.boundRegionID, regionID)
+        XCTAssertEqual(gesture.boundEventID, eventID)
+        // 幂等：再跑一次不重复加节点
+        gesture.ensureBindingsInGraph()
+        XCTAssertEqual(tap.nodes.filter { $0.type == .region }.count, 1)
+        XCTAssertEqual(tap.nodes.filter { $0.type == .event }.count, 1)
+    }
 }
