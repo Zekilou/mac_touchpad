@@ -81,7 +81,8 @@ struct NodePaletteView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         // 隐藏：废弃卡片（recognizer/set/toggle/mouse/freeze）+ 模块内部连接器（moduleInput/moduleOutput 只能在子图内手动添加/由模板生成）
-                        let hidden: Set<NodeType> = [.recognizer, .set, .toggle, .mouse, .freeze, .moduleInput, .moduleOutput]
+                        // + switch/hud（简化实现：switch 忽略 index 仅透传、hud 副作用空实现——行为与名称不符，待完整实现再展示）
+                        let hidden: Set<NodeType> = [.recognizer, .set, .toggle, .mouse, .freeze, .moduleInput, .moduleOutput, .switch, .hud]
                         ForEach(NodeType.allCases.filter { !hidden.contains($0) }, id: \.self) { type in
                             Button {
                                 onAddNode(type)

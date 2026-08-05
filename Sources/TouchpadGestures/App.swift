@@ -333,6 +333,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @objc func quit() {
         engine.stop()
         if let dev = firstDev { mt_stop_touch(dev) }
+        mt_release_devices_array(touchArrayPtr)   // 归还设备 CFArray（quit 前释放）
+        touchArrayPtr = nil
         mt_shutdown()
         NSApp.terminate(nil)
     }

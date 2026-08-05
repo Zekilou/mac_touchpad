@@ -274,10 +274,10 @@ struct TimelineCanvasView: View {
         }
     }
 
-    /// 添加节点二级分栏：按大类分组列出全部可用节点类型（与工具箱同规则隐藏废弃/连接器）
+    /// 添加节点二级分栏：按大类分组列出全部可用节点类型（与工具箱同规则隐藏废弃/连接器/简化实现）
     @ViewBuilder
     private var addNodeSubmenus: some View {
-        let hidden: Set<NodeType> = [.recognizer, .set, .toggle, .mouse, .freeze, .moduleInput, .moduleOutput]
+        let hidden: Set<NodeType> = [.recognizer, .set, .toggle, .mouse, .freeze, .moduleInput, .moduleOutput, .switch, .hud]
         let visible = NodeType.allCases.filter { !hidden.contains($0) }
         let grouped = Dictionary(grouping: visible) { $0.category }
         ForEach(NodeCategory.allCases, id: \.self) { cat in

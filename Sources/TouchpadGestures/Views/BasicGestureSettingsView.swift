@@ -154,7 +154,14 @@ struct BasicGestureSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                // Force 手势滑动信号恒为 normY（压力只做进入/退出判定）——禁用选择避免被自动纠正
+                .disabled(gesture.isForceGesture)
                 Spacer()
+            }
+            if gesture.isForceGesture {
+                Text(L10n.tr("Force 手势滑动信号固定为 Y 轴坐标（压力仅用于进入/退出判定）。",
+                             "Force gestures use Y-axis as the slide signal (pressure only gates enter/exit)."))
+                    .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 Text(L10n.tr("变换方式", "Transform")).frame(width: 150, alignment: .leading)
