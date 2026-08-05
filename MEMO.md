@@ -1,5 +1,15 @@
 # 项目备忘录
 
+## 菜单栏「设置」闪退修复（2026-08-05，170 tests 通过）
+用户报告点 menubar 菜单 Settings 闪退。排查 4 份崩溃报告（8-01/8-02/8-05），发现**两类不同崩溃**：
+1. **B 类（已修）**：8-01-233400 `_swift_reportExclusivityConflict` trap——config 并发独占冲突，9776d66 已修复
+2. **A 类（本次修，从 v1.0.0 就存在）**：`openSettings` 内 `objc_retain`/`objc_msgSend` SIGSEGV（8-01-231020、8-02-134145、8-05-141645、8-05-150138 同签名：NSMenuItem action → openSettings → 悬空指针）。4 份崩溃包全部**非 dist 构建**（Documents 裸二进制 / 外部卷 TouchpadGestures 2.app）
+- 修复：①菜单项**显式 target=self**（不再依赖响应链解析——无窗口场景下响应链可能解析到异常对象）；②`window.delegate = self` + `windowWillClose` 置 `settingsWindow = nil`（窗口关闭后下次点击重建，避免复用失效窗口状态）
+- AppDelegate 类声明加 `NSWindowDelegate`
+- 包已重建（dist/ 15:5x）+ 覆盖上传 v2.0.0 release 附件
+- 待提交；待用户用最新包复测
+
+
 ## 两会话整合（2026-08-05，170 tests 通过）
 另一会话（9776d66 启动/闪退修复 + EngineLog/引擎状态/手势健康红点 + 830791d 诊断日志开关）与我方（诊断模块/语言/形态识别/双模式脚本）已在 830791d 合并提交。审查后补 3 处整合：
 1. **elog 语义裂缝修复**：elog 的 EngineLog 写入门槛原只有 diagnosticMinimalTick → 改 `diagnosticMinimalTick || forceDebugLogging`——设置页「诊断日志」开关打开后"进入/退出 holding"也写入 /tmp/touchpad_run.log（与设置页文案一致）；顺带清理 guard 括号残留

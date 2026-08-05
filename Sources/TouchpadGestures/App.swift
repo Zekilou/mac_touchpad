@@ -91,7 +91,7 @@ struct TouchpadGesturesApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject {
     let engine = GestureEngine()
     @Published var appSettings: AppSettings {
         didSet {
@@ -309,7 +309,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let menu = NSMenu()
         menu.addItem(withTitle: "Touchpad Gestures", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: L10n.tr("设置...", "Settings..."), action: #selector(openSettings), keyEquivalent: ",")
+        // 显式 target：不依赖响应链解析（响应链在无窗口场景可能解析到异常对象——
+        // 历史崩溃 openSettings 内 objc_retain/objc_msgSend SIGSEGV 与此相关）
+        let settingsItem = NSMenuItem(title: L10n.tr("设置...", "Settings..."),
+                                      action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         // 触控板状态行：初始化中 → 就绪 / 失败（失败时提供「重试」）
         statusMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -498,11 +503,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             window.titleVisibility = .hidden
             window.contentView = hostingView
             window.center()
+            // 窗口关闭后释放引用：下次点击重建（避免复用可能已失效的窗口状态）
+            window.delegate = self
             settingsWindow = window
         }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
         settingsWindow?.orderFrontRegardless()
+    }
+
+    // NSWindowDelegate：窗口关闭时清引用，保证每次 openSettings 操作的是活窗口
+    func windowWillClose(_ notification: Notification) {
+        if let w = notification.object as? NSWindow, w === settingsWindow {
+            settingsWindow = nil
+        }
     }
 
     @objc func quit() {
