@@ -10,11 +10,14 @@ import mt_bridge
 /// - branch = 路由器：cond 决定把 value 路由到 out1/out2，未选中路输出 invalid
 public enum NodeExecutors {
 
-    /// 诊断日志开关（GestureEngine 诊断模式开启；stderr 输出，实证数据流断点）
+    /// 诊断日志开关（GestureEngine 诊断模式开启；stderr + /tmp/touchpad_run.log，实证数据流断点）
     public static var debugLogging = false
     private static func log(_ msg: String) {
+        #if DEBUG
+        DiagnosticsLog.log(msg)   // 可插拔诊断：环形缓冲（导出诊断包用）
+        #endif
         guard debugLogging else { return }
-        fputs("[ENGINE] \(msg)\n", stderr)
+        EngineLog.append("[ENGINE] \(msg)")
     }
 
     /// 执行单个节点

@@ -1,5 +1,26 @@
 # 项目备忘录
 
+## "权限全绿但触控板无反馈"诊断增强（2026-08-05，170 tests 通过）
+用户反馈：UI 正常、媒体键测试成功、权限全绿，但触控板手势无反馈。这类问题的断点（触控板数据链路/设备ID/手势被跳过）此前全部静默。落地：
+1. **EngineLog.swift（新）**：诊断日志 stderr + 落盘 /tmp/touchpad_run.log（512KB 上限，超出清空；.app 环境 stderr 用户看不到，落盘后可 tail -f）
+2. **设置页「触控板规格」扩展**：引擎状态（运行中 120Hz / 未运行）+ **每手势健康红点**（启用 / 绑定有效 region+event / 图可执行 GraphEvaluator 非 nil）——任一红 = 该手势被引擎静默跳过；AppDelegate.gestureHealth 计算属性
+3. **设置页「诊断日志」卡片（发布版可用）**：UserDefaults "engine.debugLogging" 开关 → 立即设置 GestureEngine.forceDebugLogging/NodeExecutors.debugLogging；启动时应用持久化值
+4. **triggerHaptic deviceID=0 自愈**：deviceID 为 0（offset 64 部分机型读 0 / IORegistry 时序失败）时重试 mt_device_get_id_by_index(0)，仍为 0 才跳过并记日志——震动静默失效的高频根因之一
+5. GestureEngine 暴露 `isRunning`；elog/NodeExecutors.log 改走 EngineLog（保留 DEBUG DiagnosticsLog 环形缓冲）
+- 排障路径：设置 → 触控板规格看引擎状态/设备 ID/手势红点 → 开诊断日志 → tail -f /tmp/touchpad_run.log 看 finger/quantize/进入 holding 数据流
+
+## v10.22 可插拔诊断模块（2026-08-05，170 tests 通过）
+用户需求：错误收集模块，用户导出诊断包手动发给开发者；**不进正式版本**。
+- **方案（用户确认）**：导出诊断包文件夹（用户手动发）+ 收集越详细越好 + 收集项可配置 + 模块可插拔
+- **可插拔 = `#if DEBUG` 全包裹**：`swift run`（debug）含诊断模块；`build_app.sh`（release）自动排除——nm 验证 release 二进制诊断符号为 0
+- **DiagnosticsLog.swift**（GestureEngine）：环形缓冲（200 条，NSLock 线程安全）；NodeExecutors.log / GestureEngine.elog 统一接入（#if DEBUG 内，release 零开销）
+- **CrashCatcher.swift**（TouchpadGestures/Diagnostics）：NSException handler（写完整堆栈）+ signal handler（ABRT/SEGV/BUS/ILL/FPE/TRAP，**async-signal-safe**：只用 open/write/close/strlen/signal/raise + 预构建字符串，崩溃时刻/路径/信号名在 install 时缓存）；崩溃日志写 Application Support/Diagnostics/crash-<时间戳>.log；写完恢复默认 handler 重抛（系统 crash reporter 也记录）
+- **DiagnosticsModule.swift**：environmentText（App 版本/macOS/机型 sysctl hw.model/设备 ID/权限/语言/手势数）+ writeDiagnostics（diagnostics.txt + config.json 副本 + engine.log + crashes/ 目录）
+- **设置页「诊断（开发版）」卡片**（#if DEBUG）：4 个收集项 Toggle（UserDefaults）+ 崩溃日志待导出提示 + 「导出诊断包…」（NSOpenPanel 选目录 → 生成 TouchpadGestures-Diagnostics-<时间戳> 文件夹）
+- AppDelegate.applicationDidFinishLaunching 安装 CrashCatcher（#if DEBUG）
+- 测试：DiagnosticsLogTests 4 个（顺序/环形滚动/清空/并发写入）；总 170 tests 全过
+- 教训：NSSavePanel 没有 canChooseDirectories（那是 NSOpenPanel 的属性）——选目录用 NSOpenPanel(canChooseFiles=false, canChooseDirectories=true, canCreateDirectories=true)
+
 ## 启动/菜单栏/设置闪退修复（2026-08-05，154 tests 通过）
 针对上节排查的根因落地修复（commit 待打）：
 1. **statusItem 先于触控板初始化创建**：applicationDidFinishLaunching 重构为 setupStatusItem() → 权限请求 → setupTrackpad()；触控板失败不再提前 return（否则 LSUIElement 无 Dock 图标 + 无状态栏图标 = 应用隐身"双击没反应"）

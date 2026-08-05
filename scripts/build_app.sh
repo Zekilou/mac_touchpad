@@ -1,20 +1,38 @@
 #!/bin/bash
 # 构建 TouchpadGestures.app 分发包
-# 用法: ./scripts/build_app.sh [output_dir]
+# 用法:
+#   ./scripts/build_app.sh          → 正式版（release，无诊断模块）
+#   ./scripts/build_app.sh dev      → 开发版（debug，含诊断模块，版本号 2.0.0-dev）
+#   ./scripts/build_app.sh dev 输出目录
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="TouchpadGestures"
-VERSION="2.0.0"
-BUILD_NUM="1"
-OUTPUT_DIR="${1:-$PROJECT_DIR/dist}"
+MODE="${1:-release}"                 # release（正式版）/ dev（开发版带诊断）
+OUTPUT_DIR="${2:-$PROJECT_DIR/dist}"
+
+if [ "$MODE" = "dev" ]; then
+    echo "==> [开发版] swift build (debug，含诊断模块)"
+    swift build
+    VERSION="2.0.0-dev"
+    BUILD_NUM="$(date +%Y%m%d)"      # 日期构建号，区分不同 dev 包
+else
+    echo "==> [正式版] swift build -c release（不含诊断模块）"
+    swift build -c release
+    VERSION="2.0.0"
+    BUILD_NUM="1"
+fi
 
 cd "$PROJECT_DIR"
 
 echo "==> swift build -c release"
 swift build -c release
 
-BINARY="$PROJECT_DIR/.build/release/$APP_NAME"
+if [ "$MODE" = "dev" ]; then
+    BINARY="$PROJECT_DIR/.build/debug/$APP_NAME"      # dev 构建产物在 debug 目录
+else
+    BINARY="$PROJECT_DIR/.build/release/$APP_NAME"
+fi
 if [ ! -f "$BINARY" ]; then
     echo "[ERROR] 构建产物未找到: $BINARY"
     exit 1
@@ -110,8 +128,10 @@ rm -rf "$ICONSET"
 
 echo "==> 打包 zip"
 cd "$OUTPUT_DIR"
-rm -f "$APP_NAME.zip"
-ditto -c -k --keepParent "$APP_NAME.app" "$APP_NAME.zip"
+ZIP_NAME="$APP_NAME.zip"
+[ "$MODE" = "dev" ] && ZIP_NAME="$APP_NAME-dev.zip"
+rm -f "$ZIP_NAME"
+ditto -c -k --keepParent "$APP_NAME.app" "$ZIP_NAME"
 
 # 解压后会出现 "已损坏" 提示：未签名 + com.apple.quarantine 属性导致 Gatekeeper 拦截
 # ad-hoc 签名可消除 "damaged" 提示（仍会提示"无法验证开发者"，用户右键打开即可）
@@ -120,12 +140,12 @@ codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tail -5 || echo "[warn] co
 codesign --verify --verbose=1 "$APP_BUNDLE" 2>&1 | tail -3 || true
 
 # 重新打包签名后的版本
-rm -f "$APP_NAME.zip"
-ditto -c -k --keepParent "$APP_NAME.app" "$APP_NAME.zip"
+rm -f "$ZIP_NAME"
+ditto -c -k --keepParent "$APP_NAME.app" "$ZIP_NAME"
 
 echo "==> 完成"
 echo "    App:   $APP_BUNDLE"
-echo "    Zip:   $OUTPUT_DIR/$APP_NAME.zip"
+echo "    Zip:   $OUTPUT_DIR/$ZIP_NAME"
 echo ""
 echo "    用户首次打开方式："
 echo "    1. 解压 zip"

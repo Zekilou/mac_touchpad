@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import GestureEngine
 
 /// 设置 tab：全局触摸数据流 + 软件信息 + 触控板规格 + 启动 + 菜单栏图标 + App 图标 + 配置默认值 + 版权
@@ -7,6 +8,8 @@ struct SettingsTabView: View {
     @ObservedObject var appDelegate: AppDelegate
     @State private var showRestoreFactoryAlert = false
     @State private var showSavedAsDefault = false
+    @State private var showDiagAlert = false
+    @State private var diagResult = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,6 +84,50 @@ struct SettingsTabView: View {
                             Text(String(format: "%llu", appDelegate.trackpadDeviceID)).monospacedDigit().textSelection(.enabled)
                             Spacer()
                         }
+                        HStack {
+                            Text(L10n.tr("引擎状态", "Engine")).frame(width: 150, alignment: .leading)
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(appDelegate.engineIsRunning ? Color.green : Color.red)
+                                    .frame(width: 8, height: 8)
+                                Text(appDelegate.engineIsRunning
+                                     ? L10n.tr("运行中 (120Hz)", "Running (120Hz)")
+                                     : L10n.tr("未运行", "Not running"))
+                                    .font(.caption)
+                            }
+                            Spacer()
+                        }
+                        // 每手势健康：红点 = 该手势被引擎静默跳过（"权限正常但无反馈"定位断点）
+                        ForEach(appDelegate.gestureHealth) { h in
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill((h.enabled && h.boundOK && h.graphOK) ? Color.green : Color.red)
+                                    .frame(width: 8, height: 8)
+                                Text(h.name)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                if !h.enabled { statusTag(L10n.tr("已禁用", "Disabled"), color: .orange) }
+                                if !h.boundOK { statusTag(L10n.tr("绑定无效", "Binding broken"), color: .red) }
+                                if !h.graphOK { statusTag(L10n.tr("图无效", "Invalid graph"), color: .red) }
+                                Spacer()
+                            }
+                        }
+                    }
+
+                    // 诊断日志（发布版可用——"权限全绿但无反馈"时开日志定位数据流断点）
+                    Card(title: L10n.tr("诊断日志", "Diagnostics Log")) {
+                        HStack {
+                            Text(L10n.tr("启用日志", "Enable Logging")).frame(width: 150, alignment: .leading)
+                            Toggle("", isOn: Binding(
+                                get: { appDelegate.debugLoggingEnabled },
+                                set: { appDelegate.debugLoggingEnabled = $0 }
+                            )).labelsHidden()
+                            Spacer()
+                        }
+                        Text(L10n.tr("开启后在触控板上操作，日志实时写入 /tmp/touchpad_run.log，终端执行 tail -f /tmp/touchpad_run.log 即可观察手指/量化/进入 holding 的数据流。排障完成后关闭。",
+                                    "While enabled, gesture data flows are written to /tmp/touchpad_run.log in real time. Run `tail -f /tmp/touchpad_run.log` in Terminal. Turn off after troubleshooting."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
 
                     // 启动
@@ -188,6 +235,60 @@ struct SettingsTabView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+
+                    #if DEBUG
+                    // 诊断模块（仅 DEBUG 构建显示——正式版不含）
+                    Card(title: L10n.tr("诊断（开发版）", "Diagnostics (Dev)")) {
+                        HStack {
+                            Text(L10n.tr("环境信息", "Environment")).frame(width: 150, alignment: .leading)
+                            Toggle("", isOn: Binding(
+                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyEnvironment) as? Bool ?? true },
+                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyEnvironment) }
+                            )).labelsHidden().toggleStyle(.switch)
+                            Spacer()
+                        }
+                        HStack {
+                            Text(L10n.tr("配置副本 (config.json)", "Config copy (config.json)")).frame(width: 150, alignment: .leading)
+                            Toggle("", isOn: Binding(
+                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyConfig) as? Bool ?? true },
+                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyConfig) }
+                            )).labelsHidden().toggleStyle(.switch)
+                            Spacer()
+                        }
+                        HStack {
+                            Text(L10n.tr("引擎日志", "Engine logs")).frame(width: 150, alignment: .leading)
+                            Toggle("", isOn: Binding(
+                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyLogs) as? Bool ?? true },
+                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyLogs) }
+                            )).labelsHidden().toggleStyle(.switch)
+                            Spacer()
+                        }
+                        HStack {
+                            Text(L10n.tr("崩溃日志", "Crash logs")).frame(width: 150, alignment: .leading)
+                            Toggle("", isOn: Binding(
+                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyCrash) as? Bool ?? true },
+                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyCrash) }
+                            )).labelsHidden().toggleStyle(.switch)
+                            Spacer()
+                        }
+                        HStack {
+                            Button(L10n.tr("导出诊断包…", "Export Diagnostics…")) {
+                                exportDiagnostics()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            let crashes = CrashCatcher.pendingCrashLogs().count
+                            if crashes > 0 {
+                                Text(L10n.tr("有 \(crashes) 条崩溃日志待导出", "\(crashes) crash log(s) pending"))
+                                    .font(.caption).foregroundStyle(.orange)
+                            }
+                            Spacer()
+                        }
+                        Text(L10n.tr("导出后请将文件夹通过微信/邮件/飞书发送给开发者。此卡片仅开发版显示。",
+                                    "Export then send the folder to the developer via WeChat/Mail/Feishu. Dev build only."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    #endif
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -229,5 +330,66 @@ struct SettingsTabView: View {
             Text(L10n.tr("当前配置已保存为默认，重置全部时将恢复到此配置。",
                         "Current config saved as default. 'Reset All' will restore to this."))
         }
+        #if DEBUG
+        .alert(L10n.tr("诊断包", "Diagnostics Package"),
+               isPresented: $showDiagAlert) {
+            Button(L10n.tr("好", "OK"), role: .cancel) {}
+        } message: {
+            Text(diagResult)
+        }
+        #endif
     }
+
+    /// 健康状态小标签（手势健康列表用）
+    @ViewBuilder
+    private func statusTag(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .foregroundColor(color)
+    }
+
+    // MARK: - 诊断导出（仅 DEBUG 构建）
+
+    #if DEBUG
+    /// 选目录 → 生成诊断包文件夹 → 提示用户手动发送给开发者
+    private func exportDiagnostics() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = L10n.tr("选择导出位置", "Choose folder")
+        panel.message = L10n.tr("选择保存诊断包的文件夹", "Choose a folder to save the diagnostics package")
+        panel.begin { resp in
+            guard resp == .OK, let url = panel.url else { return }
+            let defaults = UserDefaults.standard
+            let env = DiagnosticsModule.environmentText(
+                deviceID: appDelegate.trackpadDeviceID,
+                deviceCount: appDelegate.trackpadDeviceCount,
+                inputMonitoringOK: appDelegate.permissionManager.inputMonitoring.isOK,
+                accessibilityOK: appDelegate.permissionManager.accessibility.isOK,
+                appVersion: appDelegate.appVersion,
+                appBuild: appDelegate.appBuild,
+                language: appDelegate.appSettings.language,
+                gestureNames: appDelegate.config.gestures.map(\.name),
+                eventCount: appDelegate.config.events.count,
+                regionCount: appDelegate.config.regions.count)
+            let configData = try? JSONEncoder().encode(appDelegate.config)
+            let files = DiagnosticsModule.writeDiagnostics(
+                to: url,
+                includeConfig: defaults.bool(forKey: DiagnosticsModule.keyConfig),
+                includeLogs: defaults.bool(forKey: DiagnosticsModule.keyLogs),
+                includeCrash: defaults.bool(forKey: DiagnosticsModule.keyCrash),
+                environment: env,
+                configData: configData)
+            diagResult = files.isEmpty
+                ? L10n.tr("导出失败，请重试。", "Export failed, please retry.")
+                : L10n.tr("已生成 \(files.count) 个文件：\n\(files.joined(separator: "\n"))\n\n请将文件夹发送给开发者。",
+                          "\(files.count) files written:\n\(files.joined(separator: "\n"))\n\nSend the folder to the developer.")
+            showDiagAlert = true
+        }
+    }
+    #endif
 }

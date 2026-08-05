@@ -83,8 +83,11 @@ public final class GestureEngine {
     }
 
     private func elog(_ msg: String) {
-        guard Self.diagnosticMinimalTick else { return }
-        fputs("[ENGINE] \(msg)\n", stderr)
+        #if DEBUG
+        DiagnosticsLog.log(msg)   // 可插拔诊断：环形缓冲（导出诊断包用）
+        #endif
+        guard (Self.diagnosticMinimalTick) else { return }
+        EngineLog.append("[ENGINE] \(msg)")
     }
 
     // MARK: - 固定步长帧循环（Godot 式：回调只更新快照，逻辑由固定 tick 驱动）
@@ -106,6 +109,8 @@ public final class GestureEngine {
     private var tickAccum: Double = 0
     private var lastTouchWall: Double = 0
     private var started = false
+    /// 引擎帧循环是否在运行（设置页「引擎状态」显示用；计算属性只读，无需 private(set)）
+    public var isRunning: Bool { started }
     private static let tickInterval = 1.0 / 120.0
     /// 防追赶螺旋：一次间隔超过该值（挂起/休眠/长停顿）直接丢弃，不补跑（Godot 同样忽略超长 delta）
     private static let maxAccum = 0.25
@@ -315,7 +320,16 @@ public final class GestureEngine {
     /// - count > 1：后台队列按 intervalUs 间隔执行（间隔 usleep 会阻塞，必须后台）
     /// - 全局 30ms 节流：丢弃超频请求（相同行为合并），防触觉风暴
     func triggerHaptic(waveform: Int32, count: Int, intervalUs: Int32, async: Bool) {
-        guard deviceID != 0 else { return }
+        // 自愈：deviceID 为 0（offset 64 部分机型读 0 / IORegistry 首次时序失败）时
+        // 重试一次获取——否则震动静默失效（"权限全绿但无触控板反馈"的高频根因之一）
+        if deviceID == 0 {
+            let retry = mt_device_get_id_by_index(0)
+            if retry != 0 { deviceID = retry }
+        }
+        guard deviceID != 0 else {
+            EngineLog.append("[ENGINE] triggerHaptic 跳过：deviceID 为 0（触觉设备不可用）")
+            return
+        }
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastHapticTime >= Self.hapticInterval else { return }
         lastHapticTime = now

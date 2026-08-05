@@ -262,6 +262,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        CrashCatcher.install()   // 可插拔诊断：崩溃捕获（仅开发版；release 构建不含）
+        #endif
         NSApp.setActivationPolicy(appSettings.showInDock ? .regular : .accessory)
         applyAppIcon()
 
@@ -275,6 +278,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // 菜单栏图标必须先于触控板初始化创建——任何初始化失败都不能让应用"隐身"：
         // LSUIElement 无 Dock 图标，若 statusItem 未创建则进程无任何可见 UI（用户"双击没反应"主因）
         setupStatusItem()
+
+        // 应用持久化的诊断日志开关（设置页可开启；日志落 /tmp/touchpad_run.log）
+        if UserDefaults.standard.bool(forKey: "engine.debugLogging") {
+            GestureEngine.forceDebugLogging = true
+            NodeExecutors.debugLogging = true
+        }
 
         // 权限请求：辅助功能 + 输入监控。输入监控此前从未在启动时请求——
         // 未授权时 MTDeviceCreateList 返回空数组 → 设备扫描失败 → 应用隐身
@@ -439,6 +448,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var appBuild: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1" }
     var trackpadDeviceID: UInt64 { engine.deviceID }
     var trackpadDeviceCount: Int32 { deviceCount }
+    /// 引擎帧循环是否在运行（设置页「引擎状态」显示）
+    var engineIsRunning: Bool { engine.isRunning }
+
+    // MARK: - 手势健康检查（"权限全绿但无触控板反馈"时先看这里定位断点）
+
+    /// 单个手势的健康状态：启用 / 绑定有效 / 图可执行（任一失败 = 该手势被引擎静默跳过）
+    struct GestureHealth: Identifiable {
+        let id: UUID
+        let name: String
+        let enabled: Bool
+        let boundOK: Bool
+        let graphOK: Bool
+    }
+
+    var gestureHealth: [GestureHealth] {
+        config.gestures.map { g in
+            // 闭包参数遮蔽修复：$0 在 contains 内被 RegionConfig 遮蔽，需显式命名 regionID/eventID
+            let regionOK = g.boundRegionID.map { regionID in config.regions.contains { $0.id == regionID } } ?? false
+            let eventOK = g.boundEventID.map { eventID in config.events.contains { $0.id == eventID } } ?? false
+            // GraphEvaluator 构造失败（环/悬挂边）→ 引擎回退空执行器 → 该手势静默失效
+            let graphOK = GraphEvaluator(timeline: g.timeline) != nil
+            return GestureHealth(id: g.id, name: g.name, enabled: g.enabled,
+                                 boundOK: regionOK && eventOK, graphOK: graphOK)
+        }
+    }
+
+    // MARK: - 诊断日志开关（设置页可切换；落盘 /tmp/touchpad_run.log）
+
+    var debugLoggingEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "engine.debugLogging") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "engine.debugLogging")
+            GestureEngine.forceDebugLogging = newValue
+            NodeExecutors.debugLogging = newValue
+        }
+    }
 
     @objc func openSettings() {
         if settingsWindow == nil {
