@@ -105,6 +105,15 @@ public final class GestureEngine {
         started = false
         timer?.cancel()
         timer = nil
+        // 清理 holding 状态（重启后不残留旧 eventBox/trackedValue/wasHolding）
+        eventBoxes.removeAll(keepingCapacity: true)
+        effects.eventBox = nil
+        for (id, var rt) in runtimes {
+            rt.wasHolding = false
+            runtimes[id] = rt
+        }
+        holdingCount = 0
+        currentHoldingGestureName = nil
         restoreMouse()
     }
 

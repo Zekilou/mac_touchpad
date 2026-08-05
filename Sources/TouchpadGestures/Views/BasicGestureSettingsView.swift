@@ -212,10 +212,15 @@ struct BasicGestureSettingsView: View {
         }
     }
 
+    /// 实时读图的 haptic 节点参数（v10.20 修复：原实现闭包捕获 let params 快照，
+    /// 用户点 Stepper 改值后 set 更新了图，但 get 仍返回旧快照 → 显示不回显）
+    private func currentHaptic(_ title: String) -> NodeParams? {
+        gesture.timeline.nodes.first { $0.type == .haptic && $0.title == title }?.params
+    }
+
     /// 单个震动时机：波形 + 次数 + 间隔（读根图 haptic 节点；节点不存在则跳过该行）
     private func hapticRow(label: String, title: String) -> some View {
-        let node = gesture.timeline.nodes.first { $0.type == .haptic && $0.title == title }
-        guard let params = node?.params else {
+        guard currentHaptic(title) != nil else {
             return AnyView(EmptyView())
         }
         return AnyView(
@@ -224,31 +229,31 @@ struct BasicGestureSettingsView: View {
                 HStack {
                     Text(L10n.tr("波形", "Waveform")).frame(width: 150, alignment: .leading)
                     Stepper(value: Binding(
-                        get: { Int(params.waveform ?? 1) },
+                        get: { Int(currentHaptic(title)?.waveform ?? 1) },
                         set: { gesture.setHaptic(title, waveform: Int32($0)) }
                     ), in: 1...16) {
-                        Text("\(params.waveform ?? 1)").monospacedDigit()
+                        Text("\(currentHaptic(title)?.waveform ?? 1)").monospacedDigit()
                     }
                     Spacer()
                 }
                 HStack {
                     Text(L10n.tr("次数", "Count")).frame(width: 150, alignment: .leading)
                     Stepper(value: Binding(
-                        get: { params.count ?? 1 },
+                        get: { currentHaptic(title)?.count ?? 1 },
                         set: { gesture.setHaptic(title, count: $0) }
                     ), in: 1...5) {
-                        Text("\(params.count ?? 1)").monospacedDigit()
+                        Text("\(currentHaptic(title)?.count ?? 1)").monospacedDigit()
                     }
                     Spacer()
                 }
-                if (params.count ?? 1) > 1 {
+                if (currentHaptic(title)?.count ?? 1) > 1 {
                     HStack {
                         Text(L10n.tr("间隔 (ms)", "Interval (ms)")).frame(width: 150, alignment: .leading)
                         Slider(value: Binding(
-                            get: { Double(params.intervalUs ?? 50000) / 1000.0 },
+                            get: { Double(currentHaptic(title)?.intervalUs ?? 50000) / 1000.0 },
                             set: { gesture.setHaptic(title, intervalUs: Int32($0 * 1000)) }
                         ), in: 0...200)
-                        Text("\(Int((params.intervalUs ?? 50000) / 1000))").monospacedDigit()
+                        Text("\(Int((currentHaptic(title)?.intervalUs ?? 50000) / 1000))").monospacedDigit()
                             .frame(width: 40, alignment: .trailing)
                     }
                 }
