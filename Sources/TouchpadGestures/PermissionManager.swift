@@ -47,6 +47,11 @@ final class PermissionManager: ObservableObject {
     @Published var inputMonitoring: PermissionStatus = .unknown
     @Published var accessibility: PermissionStatus = .unknown
 
+    /// 输入监控权限从"未授权"变为"已授权"时回调（AppDelegate 用它自动重试触控板初始化，
+    /// 用户授权后无需重启 app——否则设备扫描早已失败且永不重试，应用一直隐身）
+    var onInputMonitoringGranted: (() -> Void)?
+    private var wasInputMonitoringGranted = false
+
     private var timer: Timer?
 
     init() {
@@ -70,9 +75,17 @@ final class PermissionManager: ObservableObject {
         // Input Monitoring: IOHIDCheckAccess
         let hidAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
         switch hidAccess {
-        case kIOHIDAccessTypeGranted: inputMonitoring = .granted
-        case kIOHIDAccessTypeDenied:  inputMonitoring = .denied
-        default:                       inputMonitoring = .unknown
+        case kIOHIDAccessTypeGranted:
+            // 边沿检测：只在"未授权 → 已授权"转变时回调（持续轮询期间每次 granted 都回调会重复初始化）
+            if !wasInputMonitoringGranted { onInputMonitoringGranted?() }
+            wasInputMonitoringGranted = true
+            inputMonitoring = .granted
+        case kIOHIDAccessTypeDenied:
+            wasInputMonitoringGranted = false
+            inputMonitoring = .denied
+        default:
+            wasInputMonitoringGranted = false
+            inputMonitoring = .unknown
         }
 
         // Accessibility: AXIsProcessTrusted

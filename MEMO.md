@@ -1,5 +1,35 @@
 # 项目备忘录
 
+## 启动/菜单栏/设置闪退修复（2026-08-05，154 tests 通过）
+针对上节排查的根因落地修复（commit 待打）：
+1. **statusItem 先于触控板初始化创建**：applicationDidFinishLaunching 重构为 setupStatusItem() → 权限请求 → setupTrackpad()；触控板失败不再提前 return（否则 LSUIElement 无 Dock 图标 + 无状态栏图标 = 应用隐身"双击没反应"）
+2. **启动时请求输入监控权限**（原只请求辅助功能——未授权时 MTDeviceCreateList 返回空数组 → 设备扫描失败 → 隐身）；PermissionManager 加 onInputMonitoringGranted 边沿回调，授权后自动重试 setupTrackpad()（幂等，trackpadReady 标志）；菜单栏加触控板状态行 + 失败时「重试初始化」菜单项
+3. **单实例保护**：ensureSingleInstance（bundleID 匹配 NSRunningApplication），已有实例 → activate 旧实例 + 退出新实例
+4. **config 并发保护（"打开设置闪退"根因）**：GestureEngine.config 加 NSLock（getter/setter 锁内读写）；processTick 每帧单次快照 `let cfg = config`（避免多次 getter 之间主线程替换 config → 旧快照索引越界）；退出 holding 写回改 mutateConfig 锁内原子（按 eventID 实时重查 index，避免越界/覆盖用户最新修改）
+5. **Cmd+, 不再弹空白设置窗**：TouchpadGesturesApp 加 CommandGroup(replacing: .appSettings) 把系统设置菜单项/快捷键重定向到 openSettings() 手动窗口
+6. **forceDebugLogging 默认 false**（v10.16 校准残留 → 有手指时 ~20Hz stderr 日志风暴）
+7. quit() 退出前 removeStatusItem
+- 保留：`Settings { EmptyView() }` 场景仍存在（仅注册 app 菜单），设置窗口仍走手动 NSWindow（非 bundle 环境兼容，MEMO 历史决策）
+
+## 启动/菜单栏/设置闪退根因排查（2026-08-05，只读分析，未改码）
+用户反馈三类概率性问题：①双击 .app 没反应；②启动后菜单栏图标不出现；③菜单栏点击设置闪退。读完 App.swift / mt_bridge.c / GestureEngine / 全部 Views 后的结论：
+
+### A. ①②同根因：applicationDidFinishLaunching 提前 return → statusItem 未创建 → 应用隐身（高置信）
+- App.swift L218-241：`guard mt_init()==0` / `guard deviceCount>0` / `guard let dev` 任一失败 → 提前 return，**statusItem 在最后才创建**；LSUIElement=true 无 Dock 图标 → 进程活着但完全不可见 = "双击没反应 / 图标不出现"
+- 触发路径：**未授权输入监控时 MTDeviceCreateList 返回空数组**（mactic 文档行为）→ 必走②return；启动时只 requestAccessibility()，**从未请求输入监控权限** → 新机器必现；授权发生在启动后 → 无重试 → 图标永不出现（概率性假象）
+- 次要：mt_init/设备扫描/IORegistry 全主线程同步，部分机器启动假死感；桌面机无内置触控板 → 空数组
+- 修复方向：statusItem 先于 MT 初始化创建；启动请求输入监控权限；MT 失败不致命（菜单显示状态+可重试）
+
+### B. ③设置闪退：tick 线程与主线程并发写 config → 数组越界/独占访问崩溃（中置信，机制明确）
+- GestureEngine.swift L215 在 **tick 队列线程**执行 `config.events[eventIndex] = b.value`（退出 holding 写回），eventIndex 是迭代前 firstIndex 快照；主线程（设置 UI 编辑/updateConfig）同时替换 config → 事件数组缩小后越界 → index out of range / exclusive access trap；用户开设置时 UI 写 config 与 tick 写回撞上概率升高
+- 修复方向：config 写回统一回主线程（DispatchQueue.main.async）或串行锁；写回用 boundEventID 实时重查 index + guard
+
+### C. 次要问题（未修）
+1. `Settings { EmptyView() }` 场景 + 手动 NSWindow 双轨 → Cmd+, 弹空白设置窗（易误认为 bug/闪退）
+2. `GestureEngine.forceDebugLogging = true` 默认开启（v10.16 校准残留）→ 有手指时 ~20Hz stderr 日志风暴
+3. 无单实例保护 → 重复双击多实例/多图标
+4. build_app.sh 打包顺序正确（先打包未签名再签名再重打包）
+
 ## v10.20 全面 bug 审查（2026-08-05，154 tests 通过）
 用户要求"读全部代码找 bug"的一轮完整排查（引擎/模型/UI 全部读完），确认并修复 6 个 bug：
 1. **事件方向重置按钮回滚错误（高）**：EventTabView 重置方向写 `.positiveDecrease`（旧默认），而 v10.19 已把默认翻转为 `.positiveIncrease`（本机 norm_y 上滑=增大）→ 用户点重置方向又反了。修复：重置改 `.positiveIncrease` + 更新 tooltip

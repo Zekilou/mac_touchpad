@@ -13,9 +13,30 @@ public final class GestureEngine {
     /// 配置（_config 存储）：setter 落盘——但 **init 直接写 _config 不触发 save**，
     /// 否则诊断模式加载（applyMinimalDiagnostic 内存图）会把诊断图错误落盘覆盖用户配置（v10.11 教训）
     private var _config: AppConfig
+    /// 配置访问锁：tick 线程每帧读 config，主线程（设置 UI 编辑/updateConfig）写 config——
+    /// 无锁时并发读写同一存储属性会触发 Swift 独占访问检查崩溃 / 数组越界（"打开设置闪退"根因）
+    private let configLock = NSLock()
     public var config: AppConfig {
-        get { _config }
-        set { _config = newValue; ConfigStore.save(newValue) }
+        get {
+            configLock.lock()
+            defer { configLock.unlock() }
+            return _config
+        }
+        set {
+            configLock.lock()
+            _config = newValue
+            configLock.unlock()
+            ConfigStore.save(newValue)
+        }
+    }
+    /// 锁内原子"读-改-写"：与主线程 UI 编辑互斥（同一临界区内按 eventID 实时重查索引，
+    /// 避免旧快照索引越界 / 覆盖用户最新修改——"打开设置闪退"根因修复）
+    private func mutateConfig(_ mutate: (inout AppConfig) -> Void) {
+        configLock.lock()
+        mutate(&_config)
+        let saved = _config
+        configLock.unlock()
+        ConfigStore.save(saved)
     }
     public var deviceID: UInt64 = 0
 
@@ -46,9 +67,9 @@ public final class GestureEngine {
     /// 手指接触绑定区域即调节——隔离验证"MT 回调 → finger → tick"底层链路。
     /// 置 true 后重启 app 进入诊断模式；false（默认）走完整手势图（识别轻点双击进入 holding）。
     public static var diagnosticMinimalTick = false
-    /// 临时（v10.16）：强制开启 finger/transform/quantize 诊断日志——校准 Force 压力阈值
-    /// （finger 日志输出真实 zPressure 读数）。校准完成后改回 false。
-    public static var forceDebugLogging = true
+    /// 诊断日志（v10.16 Force 阈值校准残留，校准完成后默认关闭）：
+    /// 开启后在触控板有手指时 ~20Hz 往 stderr 刷日志。需要排障时置 true 重启。
+    public static var forceDebugLogging = false
 
     public init() {
         var cfg = ConfigStore.load()
@@ -159,12 +180,15 @@ public final class GestureEngine {
         holdingCount = 0
         currentHoldingGestureName = nil
 
-        for gesture in config.gestures where gesture.enabled {
+        // 单次快照：整帧统一用同一份 config（避免多次 getter 之间主线程替换 config →
+        // 旧快照索引越界；写入走 mutateConfig 锁内原子，见退出分支）
+        let cfg = config
+        for gesture in cfg.gestures where gesture.enabled {
             // 绑定从图上 RegionRef/EventRef 节点读取（旧文件回退顶层字段）
             guard let regionID = gesture.boundRegionID,
                   let eventID = gesture.boundEventID,
-                  let region = config.regions.first(where: { $0.id == regionID }),
-                  let eventIndex = config.events.firstIndex(where: { $0.id == eventID }) else { continue }
+                  let region = cfg.regions.first(where: { $0.id == regionID }),
+                  let eventIndex = cfg.events.firstIndex(where: { $0.id == eventID }) else { continue }
 
             // 本手势的事件引用（per-gesture，v10.20 修复：多手势同时 holding 不串台）
             let box = eventBoxes[gesture.id]
@@ -176,7 +200,7 @@ public final class GestureEngine {
             let frame = FrameContext(
                 rawSignals: rawSignals(of: touches.first),
                 now: now,
-                directionRule: config.events[eventIndex].directionRule,
+                directionRule: cfg.events[eventIndex].directionRule,
                 isAtBoundary: boundary,
                 boundarySide: boundarySide,
                 touches: touches,
@@ -196,10 +220,10 @@ public final class GestureEngine {
                 holdingCount += 1
                 if !rt.wasHolding {
                     elog("进入 holding: \(gesture.name)")
-                    currentHoldingGestureName = config.events[eventIndex].name
+                    currentHoldingGestureName = cfg.events[eventIndex].name
                     // 建立本手势事件引用（consume 的 trackedValue 跨帧保留）
                     if eventBoxes[gesture.id] == nil {
-                        var event = config.events[eventIndex]
+                        var event = cfg.events[eventIndex]
                         event.resetTracking()
                         let newBox = EventBox(event)
                         eventBoxes[gesture.id] = newBox
@@ -210,9 +234,16 @@ public final class GestureEngine {
                 }
             } else if rt.wasHolding {
                 elog("退出 holding: \(gesture.name)")
-                // 退出：trackedValue 写回配置
+                // 退出：trackedValue 写回配置（锁内原子：按 eventID 实时重查 index，
+                // 避免与主线程 UI 编辑并发时旧快照索引越界 / 覆盖用户最新修改——"打开设置闪退"根因修复）
                 if let b = eventBoxes[gesture.id] {
-                    config.events[eventIndex] = b.value
+                    let updated = b.value
+                    let eid = eventID
+                    mutateConfig { c in
+                        if let i = c.events.firstIndex(where: { $0.id == eid }) {
+                            c.events[i] = updated
+                        }
+                    }
                 }
                 eventBoxes[gesture.id] = nil
                 effects.eventBox = nil

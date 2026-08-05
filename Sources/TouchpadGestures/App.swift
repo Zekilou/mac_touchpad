@@ -43,7 +43,18 @@ struct TouchpadGesturesApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
+        // 菜单栏 app 无主窗口：设置窗口由 AppDelegate.openSettings() 手动创建。
+        // 保留 Settings 场景仅用于注册 app 菜单，但用 CommandGroup 把系统自带的
+        // "Settings…/Cmd+," 重定向到手动窗口——否则 Cmd+, 会弹出 EmptyView 空白设置窗
         Settings { EmptyView() }
+            .commands {
+                CommandGroup(replacing: .appSettings) {
+                    Button(L10n.tr("设置...", "Settings...")) {
+                        appDelegate.openSettings()
+                    }
+                    .keyboardShortcut(",")
+                }
+            }
     }
 }
 
@@ -204,31 +215,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var deviceCount: Int32 = 0
     private var firstDev: mt_device_t? = nil
     private var statusItem: NSStatusItem?
+    private var statusMenuItem: NSMenuItem?
+    private var retryMenuItem: NSMenuItem?
+    private var trackpadReady = false
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(appSettings.showInDock ? .regular : .accessory)
         applyAppIcon()
 
-        // 首次启动请求权限（PermissionManager 轮询会持续检查状态）
+        // 单实例保护：已有实例在跑时退出本实例（避免重复双击 → 多个状态栏图标 / 多个引擎抢触控板）
+        guard ensureSingleInstance() else {
+            activateExistingInstance()
+            NSApp.terminate(nil)
+            return
+        }
+
+        // 菜单栏图标必须先于触控板初始化创建——任何初始化失败都不能让应用"隐身"：
+        // LSUIElement 无 Dock 图标，若 statusItem 未创建则进程无任何可见 UI（用户"双击没反应"主因）
+        setupStatusItem()
+
+        // 权限请求：辅助功能 + 输入监控。输入监控此前从未在启动时请求——
+        // 未授权时 MTDeviceCreateList 返回空数组 → 设备扫描失败 → 应用隐身
         if !permissionManager.accessibility.isOK {
             permissionManager.requestAccessibility()
         }
+        if !permissionManager.inputMonitoring.isOK {
+            permissionManager.requestInputMonitoring()
+        }
+        // 输入监控授权后自动重试触控板初始化（无需重启 app）
+        permissionManager.onInputMonitoringGranted = { [weak self] in
+            self?.setupTrackpad()
+        }
+
+        setupTrackpad()
+    }
+
+    /// 创建菜单栏图标与菜单（先于触控板初始化——菜单栏图标必须始终可见）
+    private func setupStatusItem() {
+        guard statusItem == nil else { return }
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        applyMenuBarIcon()
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Touchpad Gestures", action: nil, keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: L10n.tr("设置...", "Settings..."), action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(.separator())
+        // 触控板状态行：初始化中 → 就绪 / 失败（失败时提供「重试」）
+        statusMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        menu.addItem(statusMenuItem!)
+        retryMenuItem = NSMenuItem(title: L10n.tr("重试初始化", "Retry trackpad"),
+                                   action: #selector(retryTrackpad), keyEquivalent: "")
+        menu.addItem(retryMenuItem!)
+        menu.addItem(.separator())
+        menu.addItem(withTitle: L10n.tr("退出", "Quit"), action: #selector(quit), keyEquivalent: "q")
+        statusItem?.menu = menu
+        setTrackpadStatus(L10n.tr("触控板初始化中…", "Initializing trackpad…"), retryable: false)
+    }
+
+    /// 触控板初始化（失败不致命：菜单栏显示状态 + 提供重试；权限授权后自动重试）
+    private func setupTrackpad() {
+        guard !trackpadReady else { return }
+        // 重置旧状态（重试路径幂等）
+        engine.stop()
+        if let dev = firstDev { mt_stop_touch(dev) }
+        mt_release_devices_array(touchArrayPtr)
+        touchArrayPtr = nil
+        firstDev = nil
+        deviceCount = 0
+        engine.deviceID = 0
+        mt_shutdown()
 
         guard mt_init() == 0 else {
-            print("[ERROR] mt_init 失败")
+            setTrackpadStatus(L10n.tr("触控板初始化失败", "Trackpad init failed"), retryable: true)
             return
         }
-
         deviceCount = mt_scan_devices_array(&touchArrayPtr)
         guard deviceCount > 0, let arr = touchArrayPtr else {
-            print("[ERROR] 未找到 multitouch 设备")
+            setTrackpadStatus(L10n.tr("未检测到触控板（请在系统设置中授予「输入监控」权限）",
+                                     "No trackpad detected (grant Input Monitoring in System Settings)"),
+                              retryable: true)
             return
         }
-
-        firstDev = mt_device_at_index(arr, 0)
-        guard let dev = firstDev else { return }
-
+        guard let dev = mt_device_at_index(arr, 0) else {
+            setTrackpadStatus(L10n.tr("触控板设备无效", "Invalid trackpad device"), retryable: true)
+            return
+        }
+        firstDev = dev
         let idOffset = mt_device_get_id(dev)
         let idIOReg = mt_device_get_id_by_index(0)
         engine.deviceID = idIOReg != 0 ? idIOReg : idOffset
@@ -236,17 +309,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let ctxPtr = Unmanaged.passUnretained(self).toOpaque()
         mt_start_touch(dev, touchCallback, ctxPtr)
         engine.start()
+        trackpadReady = true
+        setTrackpadStatus(L10n.tr("触控板就绪（\(deviceCount) 个设备）", "Trackpad ready (\(deviceCount) devices)"),
+                          retryable: false)
+    }
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        applyMenuBarIcon()
+    private func setTrackpadStatus(_ text: String, retryable: Bool) {
+        statusMenuItem?.title = text
+        retryMenuItem?.isHidden = !retryable
+    }
 
-        let menu = NSMenu()
-        menu.addItem(withTitle: "Touchpad Gestures", action: nil, keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: L10n.tr("设置...", "Settings..."), action: #selector(openSettings), keyEquivalent: ",")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: L10n.tr("退出", "Quit"), action: #selector(quit), keyEquivalent: "q")
-        statusItem?.menu = menu
+    @objc private func retryTrackpad() {
+        setupTrackpad()
+    }
+
+    /// 单实例保护：返回 false 表示已有实例在运行
+    private func ensureSingleInstance() -> Bool {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.zekiwithcat.TouchpadGestures"
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            .isEmpty
+    }
+
+    private func activateExistingInstance() {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.zekiwithcat.TouchpadGestures"
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .first { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }?
+            .activate()
     }
 
     func applyMenuBarIcon() {
@@ -336,6 +425,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         mt_release_devices_array(touchArrayPtr)   // 归还设备 CFArray（quit 前释放）
         touchArrayPtr = nil
         mt_shutdown()
+        if let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)   // 退出前移除状态栏图标
+            statusItem = nil
+        }
         NSApp.terminate(nil)
     }
 
