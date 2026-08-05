@@ -14,8 +14,41 @@ struct AppSettings: Codable, Equatable {
     var appIconColorRed: Double = 1.0
     var appIconColorGreen: Double = 1.0
     var appIconColorBlue: Double = 1.0
+    /// UI 语言（跟随系统/中文/英文；启动与设置变更时同步到 L10n.currentLanguage）
+    var language: AppLanguage = .system
 
     init() {}
+
+    /// 手动 Codable：新字段 decodeIfPresent 回退默认——旧 appsettings.json 缺 language 时
+    /// 不能整体 decode 失败（否则全部设置被重置为默认）
+    enum CodingKeys: String, CodingKey {
+        case launchAtLogin, showInDock, menuBarIcon, menuBarIconSize
+        case appIconColorRed, appIconColorGreen, appIconColorBlue, language
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        showInDock = try c.decodeIfPresent(Bool.self, forKey: .showInDock) ?? false
+        menuBarIcon = try c.decodeIfPresent(String.self, forKey: .menuBarIcon) ?? "hand.tap"
+        menuBarIconSize = try c.decodeIfPresent(CGFloat.self, forKey: .menuBarIconSize) ?? 14
+        appIconColorRed = try c.decodeIfPresent(Double.self, forKey: .appIconColorRed) ?? 1.0
+        appIconColorGreen = try c.decodeIfPresent(Double.self, forKey: .appIconColorGreen) ?? 1.0
+        appIconColorBlue = try c.decodeIfPresent(Double.self, forKey: .appIconColorBlue) ?? 1.0
+        language = try c.decodeIfPresent(AppLanguage.self, forKey: .language) ?? .system
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(launchAtLogin, forKey: .launchAtLogin)
+        try c.encode(showInDock, forKey: .showInDock)
+        try c.encode(menuBarIcon, forKey: .menuBarIcon)
+        try c.encode(menuBarIconSize, forKey: .menuBarIconSize)
+        try c.encode(appIconColorRed, forKey: .appIconColorRed)
+        try c.encode(appIconColorGreen, forKey: .appIconColorGreen)
+        try c.encode(appIconColorBlue, forKey: .appIconColorBlue)
+        try c.encode(language, forKey: .language)
+    }
 
     static var url: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -61,7 +94,11 @@ struct TouchpadGesturesApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let engine = GestureEngine()
     @Published var appSettings: AppSettings {
-        didSet { appSettings.save() }
+        didSet {
+            // UI 语言同步到 L10n（切语言即时生效；@Published objectWillChange → 依赖视图重算 → 文本刷新）
+            L10n.currentLanguage = appSettings.language
+            appSettings.save()
+        }
     }
     @Published var showResetAllAlert = false
 
@@ -99,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case .gestures: return selectedGestureID ?? config.gestures.first?.id
         case .events:   return selectedEventID ?? config.events.first?.id
         case .regions:  return selectedRegionID ?? config.regions.first?.id
+        case .morphology: return nil
         case .settings: return nil
         }
     }
@@ -108,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case .gestures: return config.gestures.first { $0.id == selectedGestureID }?.name ?? config.gestures.first?.name
         case .events:   return config.events.first { $0.id == selectedEventID }?.name ?? config.events.first?.name
         case .regions:  return config.regions.first { $0.id == selectedRegionID }?.name ?? config.regions.first?.name
+        case .morphology: return nil
         case .settings: return nil
         }
     }
@@ -117,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case .gestures: return config.gestures.count > 1
         case .events:   return config.events.count > 1
         case .regions:  return config.regions.count > 1
+        case .morphology: return false
         case .settings: return false
         }
     }
@@ -133,6 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case .regions:
             let r = RegionConfig(name: L10n.tr("新区域", "New Region"), xMin: 0.4, xMax: 0.6, yMin: 0.4, yMax: 0.6)
             config.regions.append(r); selectedRegionID = r.id
+        case .morphology: break
         case .settings: break
         }
     }
@@ -152,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             if let i = config.events.firstIndex(where: { $0.id == id }) { config.events[i].name = name }
         case .regions:
             if let i = config.regions.firstIndex(where: { $0.id == id }) { config.regions[i].name = name }
-        case .settings: break
+        case .morphology, .settings: break
         }
         renameText = ""
     }
@@ -172,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             let bound = config.gestures.filter { $0.boundRegionID == id }.count
             if bound > 0 { pendingDelete = .region(id); showDeleteAlert = true }
             else { performRegionDelete(id) }
-        case .settings: break
+        case .morphology, .settings: break
         }
     }
 

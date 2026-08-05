@@ -250,4 +250,36 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertFalse(config.timeline.edges.contains { $0.from.portName == "value" || $0.from.portName == "output" })
         XCTAssertFalse(config.timeline.edges.contains { $0.to.portName == "input" })
     }
+
+    // MARK: - GlobalSettings 向后兼容（v10.21 新增 palmFilter）
+
+    /// 旧 config.json 的 global 缺 palmFilter → decode 不失败，回退默认 true（否则用户配置全丢）
+    func testGlobalSettingsMissingPalmFilterDecodesWithDefault() throws {
+        let json = """
+        {"frameRateLimit":0,"touchSizeMin":0.1,"touchSizeMax":1.35}
+        """
+        let data = json.data(using: .utf8)!
+        let g = try JSONDecoder().decode(GlobalSettings.self, from: data)
+        XCTAssertEqual(g.touchSizeMax, 1.35)
+        XCTAssertEqual(g.palmFilter, true, "旧配置缺 palmFilter 应回退默认 true（手掌过滤开）")
+    }
+
+    func testGlobalSettingsPalmFilterRoundTrip() throws {
+        var g = GlobalSettings()
+        g.palmFilter = false
+        g.touchSizeMax = 1.5
+        let data = try JSONEncoder().encode(g)
+        let decoded = try JSONDecoder().decode(GlobalSettings.self, from: data)
+        XCTAssertEqual(decoded.palmFilter, false)
+        XCTAssertEqual(decoded.touchSizeMax, 1.5)
+    }
+
+    /// syncingFingerSizes 同步 palmFilter 到 finger 节点（含递归子图）
+    func testSyncingFingerSizesSyncsPalmFilter() {
+        let finger = NodeConfig(type: .finger, x: 0, y: 0)
+        let tl = TimelineConfig(trigger: .onFirstTap, nodes: [finger], entryNodeIDs: [finger.id])
+        let synced = ConfigStore.syncingFingerSizes(tl, sizeMin: 0.1, sizeMax: 1.35, palmFilter: false)
+        XCTAssertEqual(synced.nodes.first?.params.palmFilter, false)
+        XCTAssertEqual(synced.nodes.first?.params.touchSizeMax, 1.35)
+    }
 }

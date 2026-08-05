@@ -457,7 +457,12 @@ public enum NodeExecutors {
         let region = inputs["region"]?.value.regionValue
         let sizeMin = p.touchSizeMin ?? 0.1
         let sizeMax = p.touchSizeMax ?? 1.0
-        func isSizeValid(_ t: mt_touch_t) -> Bool { t.size >= sizeMin && t.size <= sizeMax }
+        // 手掌过滤（v10.21）：palmFilter=false 时只按下限过滤（重压/手掌也会进入识别）；
+        // 默认 true 保持原行为（size 超上限视为手掌排除）
+        let palmFilter = p.palmFilter ?? true
+        func isSizeValid(_ t: mt_touch_t) -> Bool {
+            palmFilter ? (t.size >= sizeMin && t.size <= sizeMax) : t.size >= sizeMin
+        }
         func inRegion(_ t: mt_touch_t) -> Bool { region?.contains(x: t.norm_x, y: t.norm_y) ?? true }
         // 在区域内、尺寸有效、非 lift/None 的手指（按下/存在状态用——过滤手掌/区域外）
         let active = touches.first {

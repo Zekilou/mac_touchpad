@@ -51,6 +51,24 @@ struct SettingsTabView: View {
                         }
                     }
 
+                    // 语言（跟随系统/中文/英文；修改即时生效，@Published 通知全部 UI 重算）
+                    Card(title: L10n.tr("语言", "Language")) {
+                        HStack {
+                            Text(L10n.tr("界面语言", "UI Language")).frame(width: 150, alignment: .leading)
+                            Picker(L10n.tr("界面语言", "UI Language"), selection: Binding(
+                                get: { appDelegate.appSettings.language },
+                                set: { appDelegate.appSettings.language = $0 }
+                            )) {
+                                ForEach(AppLanguage.allCases, id: \.self) { lang in
+                                    Text(lang.displayName).tag(lang)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            Spacer()
+                        }
+                    }
+
                     // 触控板规格
                     Card(title: L10n.tr("触控板规格", "Trackpad Spec")) {
                         HStack {

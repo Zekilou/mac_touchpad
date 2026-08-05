@@ -1,6 +1,7 @@
 import XCTest
 // 显式导入：消除与 Foundation.Predicate(macOS 14+) 的同名歧义
 import enum GestureEngine.Predicate
+import mt_bridge
 @testable import GestureEngine
 
 final class NodeExecutorsTests: XCTestCase {
@@ -317,5 +318,44 @@ final class NodeExecutorsTests: XCTestCase {
         XCTAssertFalse(PredicateEvaluator.evaluate(
             Predicate.not(.atBoundary),
             input: .unit, frame: frame, state: &state, nodeID: UUID()))
+    }
+
+    // MARK: - 手掌过滤（v10.21 形态识别）
+
+    private func bigTouch(size: Float = 1.5) -> mt_touch_t {
+        var t = mt_touch_t()
+        t.state = 4; t.size = size; t.norm_x = 0.5; t.norm_y = 0.5
+        return t
+    }
+
+    /// palmFilter=false：size 超上限（>1.35 手掌大小）仍识别为手指（只按下限过滤）
+    func testFingerPalmFilterOffAcceptsBigSize() {
+        let node = floatNode(.finger, NodeParams(touchSizeMin: 0.1, touchSizeMax: 1.35, palmFilter: false))
+        let result = exec(node, inputs: ["fingers": .fingers([bigTouch()])])
+        XCTAssertEqual(result.outputs?["touching"]?.boolValue, true,
+                       "palmFilter=false 时重压/手掌（size 1.5）应仍进入手指识别")
+        XCTAssertEqual(result.outputs?["present"]?.boolValue, true)
+    }
+
+    /// 默认 palmFilter=true：size 超上限视为手掌，从手指识别（touching/active）排除
+    func testFingerPalmFilterOnRejectsBigSize() {
+        let node = floatNode(.finger, NodeParams(touchSizeMin: 0.1, touchSizeMax: 1.35))
+        let result = exec(node, inputs: ["fingers": .fingers([bigTouch()])])
+        XCTAssertEqual(result.outputs?["touching"]?.boolValue, false,
+                       "默认手掌过滤下 size 1.5（>上限）应视为手掌排除")
+        // present 是宽松信号（结束类判定），不过滤手掌——v10.7 原则
+        XCTAssertEqual(result.outputs?["present"]?.boolValue, true)
+    }
+
+    /// palmFilter 开关不影响正常尺寸手指的识别
+    func testFingerPalmFilterNormalSizeAlwaysTouching() {
+        var t = bigTouch(size: 0.5)
+        t.norm_x = 0.5; t.norm_y = 0.5
+        let on = exec(floatNode(.finger, NodeParams(touchSizeMin: 0.1, touchSizeMax: 1.35)),
+                      inputs: ["fingers": .fingers([t])])
+        let off = exec(floatNode(.finger, NodeParams(touchSizeMin: 0.1, touchSizeMax: 1.35, palmFilter: false)),
+                       inputs: ["fingers": .fingers([t])])
+        XCTAssertEqual(on.outputs?["touching"]?.boolValue, true)
+        XCTAssertEqual(off.outputs?["touching"]?.boolValue, true)
     }
 }

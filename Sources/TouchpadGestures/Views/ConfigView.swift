@@ -4,7 +4,7 @@ import GestureEngine
 // MARK: - Primary Tab
 
 enum PrimaryTab: String, CaseIterable, Identifiable, Hashable {
-    case gestures, events, regions, settings
+    case gestures, events, regions, morphology, settings
 
     var id: String { rawValue }
 
@@ -13,6 +13,7 @@ enum PrimaryTab: String, CaseIterable, Identifiable, Hashable {
         case .gestures: return L10n.tr("手势", "Gestures")
         case .events:   return L10n.tr("事件", "Events")
         case .regions:  return L10n.tr("区域", "Regions")
+        case .morphology: return L10n.tr("形态识别", "Morphology")
         case .settings: return L10n.tr("设置", "Settings")
         }
     }
@@ -22,6 +23,7 @@ enum PrimaryTab: String, CaseIterable, Identifiable, Hashable {
         case .gestures: return "hand.tap"
         case .events:   return "bolt.fill"
         case .regions:  return "rectangle.dashed"
+        case .morphology: return "hand.point.up.left"
         case .settings: return "gearshape"
         }
     }
@@ -84,7 +86,9 @@ struct ConfigView: View {
             DetailContent()
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
-                        if appDelegate.currentEditingTab != .settings {
+                        // 设置类页（设置/形态识别）不显示增删改编辑菜单
+                        if appDelegate.currentEditingTab != .settings
+                            && appDelegate.currentEditingTab != .morphology {
                             EditMenu(tab: appDelegate.currentEditingTab)
                         }
                     }
@@ -137,6 +141,7 @@ struct DetailContent: View {
             case .gestures: GesturesDetail()
             case .events:   EventsDetail()
             case .regions:  RegionsDetail()
+            case .morphology: MorphologyDetail()
             case .settings: SettingsDetail()
             }
         }

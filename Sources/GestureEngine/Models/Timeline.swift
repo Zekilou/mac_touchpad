@@ -226,6 +226,7 @@ public struct NodeParams: Codable, Hashable {
     // 识别器算法参数（卡片内配置，不进数据流）
     public var touchSizeMin: Float?      // recognizer 尺寸过滤下限（防手掌）
     public var touchSizeMax: Float?      // recognizer 尺寸过滤上限
+    public var palmFilter: Bool?         // finger 手掌过滤开关（false 时只按下限过滤）
     // 变量操作（set/toggle：key 见下方流控制）
     public var value: Float?             // set：要写入变量的值
     // 绑定引用
@@ -293,6 +294,7 @@ public struct NodeParams: Codable, Hashable {
                 holdMinDuration: Double? = nil,
                 touchSizeMin: Float? = nil,
                 touchSizeMax: Float? = nil,
+                palmFilter: Bool? = nil,
                 value: Float? = nil,
                 regionID: UUID? = nil,
                 eventID: UUID? = nil,
@@ -345,6 +347,7 @@ public struct NodeParams: Codable, Hashable {
         self.holdMinDuration = holdMinDuration
         self.touchSizeMin = touchSizeMin
         self.touchSizeMax = touchSizeMax
+        self.palmFilter = palmFilter
         self.value = value
         self.regionID = regionID
         self.eventID = eventID
@@ -404,6 +407,7 @@ public struct NodeParams: Codable, Hashable {
         case "holdMinDuration": p.holdMinDuration = value as? Double
         case "touchSizeMin":   p.touchSizeMin = value as? Float
         case "touchSizeMax":   p.touchSizeMax = value as? Float
+        case "palmFilter":     p.palmFilter = value as? Bool
         case "value":          p.value = value as? Float
         case "regionID":       p.regionID = value as? UUID
         case "eventID":        p.eventID = value as? UUID

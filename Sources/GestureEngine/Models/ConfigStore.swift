@@ -98,10 +98,11 @@ public enum ConfigStore {
                     didChange = true
                 }
                 gesture.ensureBindingsInGraph()
-                // 全局触摸尺寸过滤是唯一事实来源：finger 节点参数同步 global（含递归子图）
+                // 全局触摸尺寸/手掌过滤是唯一事实来源：finger 节点参数同步 global（含递归子图）
                 let synced = syncingFingerSizes(gesture.timeline,
                                                 sizeMin: cfg.global.touchSizeMin,
-                                                sizeMax: cfg.global.touchSizeMax)
+                                                sizeMax: cfg.global.touchSizeMax,
+                                                palmFilter: cfg.global.palmFilter)
                 if synced != gesture.timeline {
                     gesture.timeline = synced
                     didChange = true
@@ -274,15 +275,17 @@ public enum ConfigStore {
     // MARK: - 手指尺寸同步（全局 touchSize 是唯一事实来源，finger 节点参数跟随，含递归子图）
 
     static func syncingFingerSizes(_ timeline: TimelineConfig,
-                                   sizeMin: Float, sizeMax: Float) -> TimelineConfig {
+                                   sizeMin: Float, sizeMax: Float,
+                                   palmFilter: Bool) -> TimelineConfig {
         var tl = timeline
         for i in tl.nodes.indices {
             if tl.nodes[i].type == .finger {
                 tl.nodes[i].params.touchSizeMin = sizeMin
                 tl.nodes[i].params.touchSizeMax = sizeMax
+                tl.nodes[i].params.palmFilter = palmFilter
             }
             if var sub = tl.nodes[i].subgraph {
-                sub = syncingFingerSizes(sub, sizeMin: sizeMin, sizeMax: sizeMax)
+                sub = syncingFingerSizes(sub, sizeMin: sizeMin, sizeMax: sizeMax, palmFilter: palmFilter)
                 tl.nodes[i].subgraph = sub
             }
         }
