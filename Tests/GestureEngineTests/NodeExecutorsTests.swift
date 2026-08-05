@@ -124,7 +124,7 @@ final class NodeExecutorsTests: XCTestCase {
 
     /// gate 输出 pass 布尔（不是阻塞链）
     func testGateOutputsBool() {
-        let node = floatNode(.gate, NodeParams(threshold: 0.5, comparator: .gte))
+        let node = floatNode(.gate, NodeParams(comparator: .gte, threshold: 0.5))
         XCTAssertEqual(exec(node, inputs: ["value": .float(0.6)]).outputs?["pass"]?.boolValue, true)
         XCTAssertEqual(exec(node, inputs: ["value": .float(0.4)]).outputs?["pass"]?.boolValue, false)
     }

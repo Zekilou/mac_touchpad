@@ -22,25 +22,50 @@ public enum GraphValidationResult: Equatable {
 /// - 校验入口节点存在且可达所有节点
 public enum TimelineGraphValidator {
 
+    /// 判断是否为"帧尾写边"：进入 varRef/set/toggle 节点的边，或进入模块**写类输入端口**的边
+    /// （写请求帧尾生效，不参与拓扑排序）
+    /// 摩尔状态机语义：varRef 读 state 旧值（不依赖本帧写方），写请求帧尾 flush → 跨帧无环
+    /// 模块写类端口（ModulePort.isWrite）：模块输出→tick 链→写类输入的跨模块环在拓扑中忽略，
+    /// 执行器在帧末延迟注入（见 GraphEvaluator 第二遍 module 处理）
+    public static func isWriteEdge(_ edge: Edge, nodes: [UUID: NodeConfig]) -> Bool {
+        guard let node = nodes[edge.to.nodeID] else { return false }
+        switch node.type {
+        case .varRef, .set, .toggle:
+            return true
+        case .module:
+            if let inputs = node.params.moduleInputs,
+               inputs.contains(where: { $0.name == edge.to.portName && $0.isWrite }) {
+                return true
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
     /// 执行拓扑排序，返回执行顺序（无环才返回 .valid）
-    public static func topologicalOrder(of timeline: TimelineConfig) -> GraphValidationResult {
-        // 0. 节点 ID 集合
+    /// - Parameter ignoreWriteEdges: 忽略帧尾写边（varRef 写请求），用于状态机展开图（读旧值 → 转移 → 帧尾写）
+    public static func topologicalOrder(of timeline: TimelineConfig,
+                                        ignoreWriteEdges: Bool = false) -> GraphValidationResult {
+        // 0. 节点 ID 集合 + 节点表（写边判定用）
         let nodeIDs = Set(timeline.nodes.map(\.id))
         guard !nodeIDs.isEmpty else { return .valid(order: []) }
+        let nodes = Dictionary(uniqueKeysWithValues: timeline.nodes.map { ($0.id, $0) })
+        let isIgnored: (Edge) -> Bool = ignoreWriteEdges ? { isWriteEdge($0, nodes: nodes) } : { _ in false }
 
-        // 1. 校验悬挂边
+        // 1. 校验悬挂边（所有边都查，含写边）
         for edge in timeline.edges {
             if !nodeIDs.contains(edge.from.nodeID) || !nodeIDs.contains(edge.to.nodeID) {
                 return .danglingEdge(edge)
             }
         }
 
-        // 2. Kahn 算法：入度统计
+        // 2. Kahn 算法：入度统计（忽略写边）
         var inDegree: [UUID: Int] = [:]
         for node in timeline.nodes { inDegree[node.id] = 0 }
         var adjacency: [UUID: [UUID]] = [:]
         for node in timeline.nodes { adjacency[node.id] = [] }
-        for edge in timeline.edges {
+        for edge in timeline.edges where !isIgnored(edge) {
             inDegree[edge.to.nodeID, default: 0] += 1
             adjacency[edge.from.nodeID, default: []].append(edge.to.nodeID)
         }

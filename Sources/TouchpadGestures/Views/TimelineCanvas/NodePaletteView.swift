@@ -7,21 +7,40 @@ import GestureEngine
 /// 节点属性编辑/连线管理已内嵌到节点卡片内（无外部属性编辑器）
 struct NodePaletteView: View {
     @Binding var timeline: TimelineConfig
-    @Binding var selectedNodeID: UUID?
+    @Binding var selectedNodeIDs: Set<UUID>
     @Binding var zoom: CGFloat
     @Binding var pan: CGSize
+    /// 手势启用开关（图的全局设置）
+    @Binding var enabled: Bool
     /// 画布可视尺寸（用于「适应画布」）
     let canvasSize: CGSize
     /// 适应画布（由外层持有画布状态，此处回调）
     let onFit: () -> Void
+    /// 自动整理（数据流从左到右分层排布）
+    let onLayout: () -> Void
+    /// 添加节点（对角线排布逻辑在 GraphView 统一持有，工具箱与右键菜单共用）
+    let onAddNode: (NodeType) -> Void
 
-    /// 新节点自动排列计数（对角线排布避免重叠）
-    @State private var addCount: Int = 0
     /// 工具箱折叠状态（默认收起，省空间）
     @State private var isPaletteExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // 手势启用开关（图的全局设置）
+            HStack(spacing: 6) {
+                Toggle(isOn: $enabled) { EmptyView() }
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                Text(enabled ? L10n.tr("已启用", "Enabled") : L10n.tr("已禁用", "Disabled"))
+                    .font(.caption.bold())
+                    .foregroundStyle(enabled ? Color.secondary : Color.red)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.05)))
+
             // 缩放控制
             HStack(spacing: 8) {
                 zoomButton(systemImage: "minus.magnifyingglass") { zoom = max(zoom / 1.2, 0.3) }
@@ -31,6 +50,8 @@ struct NodePaletteView: View {
                 zoomButton(systemImage: "plus.magnifyingglass") { zoom = min(zoom * 1.2, 3.0) }
                 zoomButton(systemImage: "arrow.up.left.and.arrow.down.right") { onFit() }
                     .help(L10n.tr("适应画布", "Fit canvas"))
+                zoomButton(systemImage: "wand.and.stars") { onLayout() }
+                    .help(L10n.tr("自动整理（数据流从左到右）", "Auto layout (left→right)"))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -59,10 +80,11 @@ struct NodePaletteView: View {
             if isPaletteExpanded {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        // 专有行为卡片已废弃（mouse/freeze 改由 set/toggle 变量操作表达），工具箱隐藏
-                        ForEach(NodeType.allCases.filter { $0 != .mouse && $0 != .freeze }, id: \.self) { type in
+                        // 隐藏：废弃卡片（recognizer/set/toggle/mouse/freeze）+ 模块内部连接器（moduleInput/moduleOutput 只能在子图内手动添加/由模板生成）
+                        let hidden: Set<NodeType> = [.recognizer, .set, .toggle, .mouse, .freeze, .moduleInput, .moduleOutput]
+                        ForEach(NodeType.allCases.filter { !hidden.contains($0) }, id: \.self) { type in
                             Button {
-                                addNode(type)
+                                onAddNode(type)
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: type.symbolName)
@@ -104,18 +126,5 @@ struct NodePaletteView: View {
                 .frame(width: 22, height: 22)
         }
         .buttonStyle(.borderless)
-    }
-
-    // MARK: - 添加节点
-
-    private func addNode(_ type: NodeType) {
-        // 对角线排布：每添加 8 个换一行
-        let col = addCount % 8
-        let row = addCount / 8
-        let node = NodeConfig(type: type, x: Double(col * 220), y: Double(row * 120))
-        timeline.nodes.append(node)
-        timeline.entryNodeIDs.append(node.id)
-        addCount += 1
-        selectedNodeID = node.id
     }
 }

@@ -54,9 +54,11 @@ struct ScrollWheelCatcher: NSViewRepresentable {
                         }
                     case .magnify:
                         // 手势中心：窗口坐标 → 画布视图坐标（缩放以此为锚点）
+                        // 注意 y 翻转：locationInWindow/frame.origin 是 AppKit 坐标（y 向上），
+                        // 画布视图坐标 y 向下（原点左上）——不翻转会导致缩放锚点垂直错位（缩放时曲线/节点位移）
                         let origin = self.frame.origin
                         let center = CGPoint(x: event.locationInWindow.x - origin.x,
-                                             y: event.locationInWindow.y - origin.y)
+                                             y: self.bounds.height - (event.locationInWindow.y - origin.y))
                         self.onMagnify?(1 + event.magnification, center)
                         return nil
                     default:

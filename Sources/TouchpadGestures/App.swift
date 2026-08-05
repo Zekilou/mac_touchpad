@@ -153,11 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             config.gestures.removeAll { $0.id == id }
             if selectedGestureID == id { selectedGestureID = config.gestures.first?.id }
         case .events:
-            let bound = config.gestures.filter { $0.eventID == id }.count
+            // v4 起绑定在图节点（EventRef），顶层 eventID 为 nil——用 boundEventID 判断绑定
+            let bound = config.gestures.filter { $0.boundEventID == id }.count
             if bound > 0 { pendingDelete = .event(id); showDeleteAlert = true }
             else { performEventDelete(id) }
         case .regions:
-            let bound = config.gestures.filter { $0.regionID == id }.count
+            let bound = config.gestures.filter { $0.boundRegionID == id }.count
             if bound > 0 { pendingDelete = .region(id); showDeleteAlert = true }
             else { performRegionDelete(id) }
         case .settings: break
@@ -175,8 +176,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func performEventDelete(_ id: UUID) {
         guard let first = config.events.first(where: { $0.id != id }) else { return }
-        for i in 0..<config.gestures.count {
-            if config.gestures[i].eventID == id { config.gestures[i].eventID = first.id }
+        // v4 起绑定在图节点（EventRef）——重绑定时更新图上节点参数，否则手势静默失效
+        for i in 0..<config.gestures.count where config.gestures[i].boundEventID == id {
+            config.gestures[i].updateNodeParams(.event, title: "绑定事件") { $0.eventID = first.id }
         }
         config.events.removeAll { $0.id == id }
         if selectedEventID == id { selectedEventID = first.id }
@@ -184,8 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func performRegionDelete(_ id: UUID) {
         guard let first = config.regions.first(where: { $0.id != id }) else { return }
-        for i in 0..<config.gestures.count {
-            if config.gestures[i].regionID == id { config.gestures[i].regionID = first.id }
+        for i in 0..<config.gestures.count where config.gestures[i].boundRegionID == id {
+            config.gestures[i].updateNodeParams(.region, title: "触发区域") { $0.regionID = first.id }
         }
         config.regions.removeAll { $0.id == id }
         if selectedRegionID == id { selectedRegionID = first.id }
@@ -193,8 +195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func boundGestureCount(for target: DeleteTarget) -> Int {
         switch target {
-        case .event(let id):  return config.gestures.filter { $0.eventID == id }.count
-        case .region(let id): return config.gestures.filter { $0.regionID == id }.count
+        case .event(let id):  return config.gestures.filter { $0.boundEventID == id }.count
+        case .region(let id): return config.gestures.filter { $0.boundRegionID == id }.count
         }
     }
 
@@ -233,6 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
         let ctxPtr = Unmanaged.passUnretained(self).toOpaque()
         mt_start_touch(dev, touchCallback, ctxPtr)
+        engine.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyMenuBarIcon()
@@ -328,7 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     @objc func quit() {
-        engine.restoreMouse()
+        engine.stop()
         if let dev = firstDev { mt_stop_touch(dev) }
         mt_shutdown()
         NSApp.terminate(nil)
@@ -354,7 +357,7 @@ private let touchCallback: @convention(c) (
     if let touches = touches, n > 0 {
         for i in 0..<Int(n) { touchArray.append(touches[i]) }
     }
-    delegate.engine.processFrame(touches: touchArray)
+    delegate.engine.onTouchFrame(touches: touchArray)
 }
 
 // ConfigView 已移至 Views/ConfigView.swift

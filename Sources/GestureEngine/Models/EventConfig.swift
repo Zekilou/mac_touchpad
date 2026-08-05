@@ -139,7 +139,7 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
                 actionType: ActionType,
                 step: Float,
                 boundaryThreshold: Float,
-                directionRule: DirectionRule = .positiveDecrease, // 默认对齐旧 upIncrease（normY 上滑=增加）
+                directionRule: DirectionRule = .positiveIncrease, // 本机 norm_y 方向与常规假设相反：上滑=norm_y 增大 → positiveIncrease（上滑=增加）
                 executionMethod: ExecutionMethod = .mediaKey) {
         self.id = id
         self.name = name
@@ -158,29 +158,29 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
         step = try container.decode(Float.self, forKey: .step)
         boundaryThreshold = try container.decode(Float.self, forKey: .boundaryThreshold)
         // DirectionRule：用自定义 init 处理旧 upIncrease/upDecrease
-        directionRule = try container.decodeIfPresent(DirectionRule.self, forKey: .directionRule) ?? .positiveDecrease
+        directionRule = try container.decodeIfPresent(DirectionRule.self, forKey: .directionRule) ?? .positiveIncrease
         executionMethod = try container.decodeIfPresent(ExecutionMethod.self, forKey: .executionMethod) ?? .mediaKey
     }
 
     // MARK: - 默认事件
 
-    /// 默认音量事件：媒体键模式 + positiveDecrease（对应旧 upIncrease：normY 上滑=音量加）
+    /// 默认音量事件：媒体键模式 + positiveIncrease（本机 norm_y 上滑=增大）
     public static let defaultVolume = EventConfig(
         name: L10n.tr("音量", "Volume"),
         actionType: .volume,
         step: 0.0125,
         boundaryThreshold: 0.001,
-        directionRule: .positiveDecrease,
+        directionRule: .positiveIncrease,
         executionMethod: .mediaKey
     )
 
-    /// 默认亮度事件：媒体键模式 + positiveDecrease（对应旧 upIncrease：normY 上滑=亮度加）
+    /// 默认亮度事件：媒体键模式 + positiveIncrease（本机 norm_y 上滑=增大）
     public static let defaultBrightness = EventConfig(
         name: L10n.tr("亮度", "Brightness"),
         actionType: .brightness,
         step: 0.0125,
         boundaryThreshold: 0.001,
-        directionRule: .positiveDecrease,
+        directionRule: .positiveIncrease,
         executionMethod: .mediaKey
     )
 
@@ -197,6 +197,11 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
     /// 重置追踪值（进入新 holding 时调用）
     public mutating func resetTracking() {
         trackedValue = nil
+    }
+
+    /// 测试辅助：直接设置追踪值（绕过系统读取；@testable 测试用）
+    public mutating func setTrackedValueForTesting(_ v: Float?) {
+        trackedValue = v
     }
 
     /// 获取追踪值（首次自动从系统读取初始化）
@@ -221,6 +226,10 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
     /// 判断当前值是否在任一边界（用于进入 holding 时唤起 HUD）
     public mutating func isAtAnyBoundary() -> Bool {
         let value = trackedCurrentValue()
+        // 读取不可靠保护：brightness 在部分机型 getBrightness 返回 0（非真实值），
+        // 无法区分"真在下边界"与"读取失败"——值 0 时不判定边界
+        // （mediaKey 由系统自然 clamp 不会越界；direct 由 consume 步骤3 clamp）
+        guard value > 0 else { return false }
         return value <= boundaryThreshold || value >= 1.0 - boundaryThreshold
     }
 
@@ -228,19 +237,19 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
 
     /// 消费手势引擎的输出，执行系统调节并返回边界结果
     ///
-    /// 流程：
-    /// 1. 根据 output 算出目标变化方向/幅度（tick 用 direction×count，continuous 用 delta 符号）
-    /// 2. 边界预检：如果当前已在边界且继续朝外 → .frozen
-    /// 3. 实际执行：根据 executionMethod 走 mediaKey 或 direct 分支
-    /// 4. 边界后检：如果本次执行后贴边了 → 发 HUD + .hitBoundary，否则 .normal
+    /// 流程（v10.1 冻结已屏蔽后的最简语义）：
+    /// - mediaKey：直接发按键（系统自然 clamp + 自带 HUD），**不读系统值**——
+    ///   getVolume/getBrightness 走 IOKit 每次 1~10ms，滑动中每 tick 读会阻塞帧回调 → 不跟手卡顿；
+    ///   冻结已屏蔽后读值只为边界判定，已无消费方 → 恒返回 .normal
+    /// - direct：读当前值 → 精确加减 → clamp → 边界后检（读值不可避免，频率低）
     ///
     /// - Parameter output: 引擎输出（.tick 或 .continuous）
-    /// - Returns: 边界结果（.normal / .hitBoundary / .frozen），供引擎决定震动和下一帧状态
+    /// - Returns: 边界结果（direct 命中边界 .hitBoundary；mediaKey 恒 .normal）
     @discardableResult
     public mutating func consume(output: GestureOutput) -> BoundaryResult {
         // --- 步骤1：解析 output → 目标增减方向 + 变化总量 ---
         let targetDir: Int       // ±1（= 目标值这一次应该增还是减）
-        let totalDelta: Float    // 目标值本次变化量（仅 direct+continuous 直接用这个值）
+        let totalDelta: Float    // 目标值本次变化量（仅 direct 用）
         let tickCount: Int       // discrete 模式：tick 次数；mediaKey 发几次
 
         switch output {
@@ -254,55 +263,46 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
             totalDelta = d
         }
 
-        // --- 步骤2：边界预检 ---
-        let current = trackedCurrentValue()
-        let alreadyAtBoundary = isAtBoundary(targetDirection: targetDir, value: current)
-        if alreadyAtBoundary {
-            // 已经在边界且继续朝外：冻结，不执行
-            return .frozen
-        }
-
-        // --- 步骤3：执行调节 ---
-        switch (actionType, executionMethod) {
-        // mediaKey：按 tickCount 发按键；continuous 退化：delta>0 发 1 次 up，<0 发 1 次 down
-        case (.volume, .mediaKey):
-            let n = (output.isTick) ? tickCount : 1
+        // --- 步骤2：执行调节（按执行方式分流）---
+        switch executionMethod {
+        case .mediaKey:
+            // 冻结已屏蔽 + HUD 由媒体键系统自带：零 IOKit 读值（见方法注释）
+            // 单帧发键上限 3（配合 SystemControl 20ms 全局节流 → 50 键/s 上限；
+            // 系统 16 档一次滑动最多 16 个有效键，超出量系统本就忽略）——防事件风暴，
+            // 普通滑动 1~2 tick 不受影响
+            let n = min(max(1, tickCount), 3)
             for _ in 0..<n {
-                if targetDir > 0 { SystemControl.volumeUp() }
-                else { SystemControl.volumeDown() }
+                switch actionType {
+                case .volume:
+                    if targetDir > 0 { SystemControl.volumeUp() } else { SystemControl.volumeDown() }
+                case .brightness:
+                    if targetDir > 0 { SystemControl.brightnessUp() } else { SystemControl.brightnessDown() }
+                }
             }
-        case (.brightness, .mediaKey):
-            let n = (output.isTick) ? tickCount : 1
-            for _ in 0..<n {
-                if targetDir > 0 { SystemControl.brightnessUp() }
-                else { SystemControl.brightnessDown() }
+            // trackedValue 推进：系统媒体键真实步长 1/16（非配置 step——v10.4 漂移教训是误用配置 step）。
+            // 引擎 boundarySide 方向感知边界分流需要"当前值"判定朝外/朝内滑动（到边界触发边界震动）；
+            // 不推进则 boundarySide 冻结在进入 holding 时的值 → 滑动到边界永远无边界反馈。
+            // 零 IOKit：首次惰性读一次（引擎进入 holding 时已读），此后纯数学推进（clamp [0,1]）
+            if trackedValue == nil { trackedValue = currentValue() }
+            let dv = Float(targetDir) * (1.0 / 16.0) * Float(n)
+            trackedValue = max(0.0, min(1.0, trackedValue! + dv))
+            return .normal
+        case .direct:
+            // direct 需要当前值精确加减（读系统值不可避免）
+            let current = trackedCurrentValue()
+            let target = max(0.0, min(1.0, current + totalDelta))
+            switch actionType {
+            case .volume:      SystemControl.setVolume(target)
+            case .brightness:  SystemControl.setBrightness(target)
             }
-        // direct：精确赋值
-        case (.volume, .direct):
-            let target = max(0.0, min(1.0, current + totalDelta))
-            SystemControl.setVolume(target)
-        case (.brightness, .direct):
-            let target = max(0.0, min(1.0, current + totalDelta))
-            SystemControl.setBrightness(target)
-        }
-
-        // --- 步骤4：边界后检 ---
-        let after: Float
-        if executionMethod == .mediaKey {
-            // mediaKey：用追踪值推进（getBrightness 可能不准）
-            trackedValue = max(0.0, min(1.0, current + totalDelta))
-            after = trackedValue!
-        } else {
-            // direct：从系统读取精确值
-            after = currentValue()
+            let after = currentValue()
             trackedValue = after
+            if isAtBoundary(targetDirection: targetDir, value: after) {
+                postBoundaryKeyIfNeeded()
+                return .hitBoundary
+            }
+            return .normal
         }
-        let hitBoundary = isAtBoundary(targetDirection: targetDir, value: after)
-        if hitBoundary {
-            postBoundaryKeyIfNeeded()
-            return .hitBoundary
-        }
-        return .normal
     }
 
     // MARK: - HUD 唤起辅助

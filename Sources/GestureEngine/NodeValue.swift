@@ -5,17 +5,22 @@ import mt_bridge
 
 /// 节点输出端口的统一值类型
 /// 纯计算链传 .float；量化节点传 .output(GestureOutput)；分支/gate 传 .bool；副作用节点传 .unit
-/// 数据流传 .fingers（原始触摸帧）/ .region（触发区域）
+/// 数据流传 .fingers（原始触摸帧）/ .region（触发区域）；变量用 .int（状态枚举）/ .float / .bool
 public enum NodeValue: Equatable {
+    case int(Int32)
     case float(Float)
     case output(GestureOutput)
     case bool(Bool)
     case unit
-    /// 原始触摸帧数组（touchData.fingers 输出 → recognizer 输入）
+    /// 原始触摸帧数组（touchData.fingers 输出 → finger 输入）
     case fingers([mt_touch_t])
-    /// 触发区域数据（RegionRef 输出 → recognizer 输入）
+    /// 触发区域数据（RegionRef 输出 → 相关节点输入）
     case region(RegionConfig)
 
+    public var intValue: Int32? {
+        if case .int(let v) = self { return v }
+        return nil
+    }
     public var floatValue: Float? {
         if case .float(let v) = self { return v }
         return nil
@@ -79,6 +84,8 @@ public struct SocketValue: Equatable {
 
     /// 便捷：有效浮点值
     public static func float(_ v: Float) -> SocketValue { SocketValue(valid: true, value: .float(v)) }
+    /// 便捷：有效整数（状态枚举）
+    public static func int(_ v: Int32) -> SocketValue { SocketValue(valid: true, value: .int(v)) }
     /// 便捷：有效布尔值
     public static func bool(_ v: Bool) -> SocketValue { SocketValue(valid: true, value: .bool(v)) }
     /// 便捷：有效量化输出
@@ -113,23 +120,36 @@ public struct FrameContext {
     public var directionRule: DirectionRule
     /// 当前事件值是否在边界（branch 的 atBoundary/notAtBoundary 用，由外部注入）
     public var isAtBoundary: Bool
+    /// 在哪个边界（-1=下边界 / 0=不在边界 / +1=上边界）——方向感知的边界判定用
+    public var boundarySide: Int
     /// 原始触摸帧（touchData 数据源节点用：输出 fingers + 各信号）
     public var touches: [mt_touch_t]
     /// 手势绑定区域（RegionRef 节点输出用；数据流端口，非识别器隐式注入）
     public var region: RegionConfig?
+    /// 最近一次触摸快照的墙钟时刻（秒，systemUptime）——finger 抬起判定用：
+    /// 快照陈旧（>100ms 无新触摸数据）说明 MT 回调已停止（手指离开触控板），即使快照内容还有手指也算抬起
+    public var touchTimestamp: Double
+    /// 当前墙钟时刻（秒，systemUptime）——与 touchTimestamp 配合判断快照新鲜度
+    public var wallNow: Double
 
     public init(rawSignals: [SignalSource: Float] = [:],
                 now: Double = 0,
                 directionRule: DirectionRule = .positiveDecrease,
                 isAtBoundary: Bool = false,
+                boundarySide: Int = 0,
                 touches: [mt_touch_t] = [],
-                region: RegionConfig? = nil) {
+                region: RegionConfig? = nil,
+                touchTimestamp: Double = 0,
+                wallNow: Double = 0) {
         self.rawSignals = rawSignals
         self.now = now
         self.directionRule = directionRule
         self.isAtBoundary = isAtBoundary
+        self.boundarySide = boundarySide
         self.touches = touches
         self.region = region
+        self.touchTimestamp = touchTimestamp
+        self.wallNow = wallNow
     }
 }
 
@@ -152,8 +172,18 @@ public protocol TimelineEffects {
     func freeze()
     /// 通知 UI（NotifyNode）
     func notify(label: String)
-    /// 识别器 holding 状态变化（引擎据此维护鼠标锁定/事件引用）
-    func recognizerState(holding: Bool)
+}
+
+/// 副作用抑制包装：全部 no-op（模块帧末 writePass 重跑时用，只收集写请求不重复派发）
+public struct SilentEffects: TimelineEffects {
+    public init() {}
+    public func triggerHaptic(waveform: Int32, count: Int, intervalUs: Int32, async: Bool) {}
+    public func consume(_ output: GestureOutput) -> BoundaryResult { .normal }
+    public func showHUD(direction: Int) {}
+    public func lockMouse() {}
+    public func unlockMouse() {}
+    public func freeze() {}
+    public func notify(label: String) {}
 }
 
 // MARK: - 节点执行结果
@@ -162,8 +192,11 @@ public protocol TimelineEffects {
 /// 必需输入无效 → 输出全 .invalid()（显式 valid 传播）；副作用节点仅在输入有效时执行
 public struct NodeExecutionResult {
     public var outputs: [String: SocketValue]?
+    /// var 节点的写请求（帧尾由 GraphEvaluator 统一写入 StateStore）
+    public var writes: [(key: String, value: NodeValue)]
 
-    public init(outputs: [String: SocketValue]? = nil) {
+    public init(outputs: [String: SocketValue]? = nil, writes: [(String, NodeValue)] = []) {
         self.outputs = outputs
+        self.writes = writes
     }
 }

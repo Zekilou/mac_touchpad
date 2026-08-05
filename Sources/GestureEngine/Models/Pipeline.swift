@@ -172,8 +172,12 @@ public func quantize(
     switch triggerMode {
     case .discrete:
         let absDelta = abs(delta)
-        guard absDelta >= stepNorm, stepNorm > 0 else { return nil }
-        let tickCount = Int(floor(absDelta / stepNorm))
+        // 浮点容差：normY 帧间差值恰为 stepNorm（0.02）时 Float 表示成 0.01999998，
+        // 严格 `>= stepNorm` 会漏掉整刻度 → 慢速滑动"时调时不调"（随机感）。
+        // 容差 = stepNorm 的 0.5%（0.02 → 1e-4），既容忍精度误差又不虚增刻度。
+        let eps = max(stepNorm * 0.005, 1e-5)
+        guard absDelta >= stepNorm - eps, stepNorm > 0 else { return nil }
+        let tickCount = Int(floor((absDelta + eps) / stepNorm))
         guard tickCount >= 1 else { return nil }
         let direction = mapDirection(delta) // signal + → 目标增/减
         return .tick(direction: direction, count: tickCount)

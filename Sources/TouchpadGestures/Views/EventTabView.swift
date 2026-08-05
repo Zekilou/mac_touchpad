@@ -39,8 +39,9 @@ struct EventTabView: View {
                     // 2. 方向映射：信号增 vs 目标值增减（语义升级为信号源无关）
                     Card(title: L10n.tr("方向映射", "Direction Mapping")) {
                         VStack(alignment: .leading, spacing: 8) {
-                            rowWithReset(tooltip: L10n.tr("恢复默认（normY 上滑=增加）", "Reset default (normY swipe up = increase)")) {
-                                config.events[idx].directionRule = .positiveDecrease
+                            rowWithReset(tooltip: L10n.tr("恢复默认（本机 normY 上滑=增加）", "Reset default (this machine normY swipe up = increase)")) {
+                                // v10.19：本机 norm_y 方向与常规假设相反（上滑=norm_y 增大）→ 默认 positiveIncrease（上滑=增加）
+                                config.events[idx].directionRule = .positiveIncrease
                             } content: {
                                 Text(L10n.tr("方向规则", "Direction Rule"))
                                     .frame(width: 150, alignment: .leading)
@@ -172,10 +173,11 @@ struct EventTabView: View {
         .help(tooltip)
     }
 
-    /// step 范围：媒体键模式建议对齐系统档位（1/16 起）；direct 可任意细
+    /// step 范围：mediaKey 模式建议对齐系统档位（1/16 起）；direct 可任意细
+    /// 下限 0.01 保证默认值 0.0125 落在范围内（原 0.03125 会让默认值被 Slider clamp 显示错位）
     private func stepRange(for method: ExecutionMethod) -> ClosedRange<Double> {
         switch method {
-        case .mediaKey:  return 0.03125...0.125   // 约 1/32 ~ 1/8
+        case .mediaKey:  return 0.01...0.125    // 约 1/100 ~ 1/8
         case .direct:    return 0.001...0.10       // 精确到千分之一
         }
     }

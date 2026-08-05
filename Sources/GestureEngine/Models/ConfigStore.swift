@@ -32,7 +32,7 @@ public enum ConfigStore {
     /// v1 扁平配置结构，仅用于迁移解码
     struct V1Config: Codable {
         var frameRateLimit: Double = 0
-        var touchSizeMax: Float = 1.0
+        var touchSizeMax: Float = 1.35
         var touchSizeMin: Float = 0.1
         var edgeRightThreshold: Float = 0.80
         var edgeLeftThreshold: Float = 0.20
@@ -60,13 +60,83 @@ public enum ConfigStore {
         // 先尝试 v3（当前格式）；旧 v3 文件顶层绑定补入图并保存（图成为唯一事实来源）
         if var cfg = try? JSONDecoder().decode(AppConfig.self, from: data) {
             var didChange = false
+            // 尺寸过滤修复：旧默认 touchSizeMax=1.0 会过滤较重按压的手指（按压 size 可达 ~1.35）
+            // → touching 随机 false → 双击保持中随机退出/误触发；低于 1.2 视为旧默认，提到 1.35
+            if cfg.global.touchSizeMax < 1.2 {
+                cfg.global.touchSizeMax = 1.35
+                didChange = true
+            }
             for i in cfg.gestures.indices {
                 var gesture = cfg.gestures[i]
+                // v8 升级：状态机黑盒（recognizer）→ 展开图（从旧图提取参数重新迁移）
+                if gesture.timeline.firstNode(of: .recognizer) != nil {
+                    gesture.upgradeStateMachineGraph(events: cfg.events)
+                    didChange = true
+                }
+                // v9 升级：v8 扁平展开图 → 模块化图（识别状态机/冻结管理封装成可折叠组）
+                if gesture.timeline.firstNode(of: .module) == nil,
+                   gesture.timeline.firstNode(of: .varRef) != nil {
+                    gesture.upgradeModularGraph(events: cfg.events)
+                    didChange = true
+                }
+                // v10 升级：旧边界判定 → 方向感知（冻结已屏蔽）；v10.17 起含 boundaryState 的边界分流整体移除
+                // （trackedValue 漂移误判"朝外"→ 值卡中间；系统自身 clamp 处理边界）
+                let legacyBoundary = gesture.timeline.nodes.contains { $0.type == .branch && $0.params.predicate == .notAtBoundary }
+                let activeFreeze = gesture.timeline.nodes.contains { node in
+                    node.type == .module
+                        && (node.params.moduleInputs?.contains { $0.name == "boundaryPulse" } ?? false)
+                        && gesture.timeline.edges.contains { $0.to.nodeID == node.id && $0.to.portName == "boundaryPulse" }
+                }
+                if legacyBoundary || activeFreeze
+                    || gesture.timeline.firstNode(of: .boundaryState) != nil {
+                    gesture.upgradeBoundarySense(events: cfg.events)
+                    didChange = true
+                }
+                // v10.16 升级：旧 Force 图（pressure 来自 touchData，任意位置触发）→ finger.pressure 区域内 + touching 条件
+                if gesture.timeline.nodes.contains(where: { $0.type == .module && $0.title == "Force按压识别" }) {
+                    gesture.upgradeForcePress(events: cfg.events)
+                    didChange = true
+                }
                 gesture.ensureBindingsInGraph()
+                // 全局触摸尺寸过滤是唯一事实来源：finger 节点参数同步 global（含递归子图）
+                let synced = syncingFingerSizes(gesture.timeline,
+                                                sizeMin: cfg.global.touchSizeMin,
+                                                sizeMax: cfg.global.touchSizeMax)
+                if synced != gesture.timeline {
+                    gesture.timeline = synced
+                    didChange = true
+                }
+                // 类型校验：只保留"同类型或含 generic"的边（用户规则：只能同类型的连同类型的）
+                let removed = gesture.validateEdgeTypes()
+                if !removed.isEmpty {
+                    fputs("[Config] \(gesture.name) 删除 \(removed.count) 条非法类型边: " +
+                          removed.map { "\($0.from.portName)->\($0.to.portName)" }.joined(separator: ", ") + "\n", stderr)
+                    didChange = true
+                }
                 if gesture != cfg.gestures[i] {
                     cfg.gestures[i] = gesture
                     didChange = true
                 }
+            }
+            // v10.14：Force 按压手势自动补齐（左/右边缘各一，压力保持进入——与双击手势共存，
+            // 压力识别互不干扰：重按不会让双击手势进 holding，轻点不会让 Force 手势进 holding）
+            let forceSpecs: [(name: String, regionName: String, action: ActionType)] = [
+                ("左侧Force", "左边缘", .brightness), ("右侧Force", "右边缘", .volume),
+            ]
+            for spec in forceSpecs where !cfg.gestures.contains(where: { $0.name == spec.name }) {
+                guard let region = cfg.regions.first(where: { $0.name == spec.regionName }),
+                      let event = cfg.events.first(where: { $0.actionType == spec.action }) else {
+                    fputs("[Config] Force 补齐跳过 \(spec.name)：region/action 未匹配\n", stderr)
+                    continue
+                }
+                // Force 进入震动用 buzz（波形3）——与系统触控板点击（click 1/2）明显区分（用户反馈"波形和正常点击没法区分"）
+                var forcePipeline = LegacyPipelineConfig()
+                forcePipeline.hapticEnter = HapticEvent(enabled: true, waveform: 3, count: 1, intervalUs: 0)
+                cfg.gestures.append(GestureConfig(name: spec.name, regionID: region.id, eventID: event.id,
+                                                  forcePipeline: forcePipeline, event: event,
+                                                  pressureThreshold: 2.0, holdMinDuration: 0.3))
+                fputs("[Config] 补齐 Force 手势：\(spec.name)\n", stderr)
+                didChange = true
             }
             if didChange { save(cfg) }
             return cfg
@@ -84,6 +154,28 @@ public enum ConfigStore {
             return migrated
         }
         return AppConfig()
+    }
+
+    /// **诊断最简模式**（隔离验证 tick 底层链路）：每个手势的图重建为最简图——
+    /// 屏蔽识别状态机（轻点/双击/进入 holding），手指在绑定区域内接触直接门控 tick 链。
+    /// 不落盘（内存态，仅当前进程生效），关闭开关重启即恢复完整图。
+    public static func applyMinimalDiagnostic(to cfg: AppConfig) -> AppConfig {
+        var c = cfg
+        for i in c.gestures.indices {
+            var gesture = c.gestures[i]
+            guard let regionID = gesture.boundRegionID,
+                  let eventID = gesture.boundEventID,
+                  let event = c.events.first(where: { $0.id == eventID }) else { continue }
+            gesture.timeline = TimelineMigrator.migrate(pipeline: gesture.legacyPipelineValue,
+                                                        event: event,
+                                                        regionID: regionID, eventID: eventID,
+                                                        touchSizeMin: c.global.touchSizeMin,
+                                                        touchSizeMax: c.global.touchSizeMax,
+                                                        minimalDiagnostic: true)
+            c.gestures[i] = gesture
+        }
+        fputs("[Config] 诊断最简模式：已屏蔽识别状态机，手指接触即调节\n", stderr)
+        return c
     }
 
     /// 保存配置
@@ -116,7 +208,9 @@ public enum ConfigStore {
             return GestureConfig(id: g2.id, name: g2.name,
                                  regionID: g2.regionID, eventID: g2.eventID,
                                  timeline: TimelineMigrator.migrate(pipeline: pipeline, event: event,
-                                                                    regionID: g2.regionID, eventID: g2.eventID))
+                                                                    regionID: g2.regionID, eventID: g2.eventID,
+                                                                    touchSizeMin: v2.global.touchSizeMin,
+                                                                    touchSizeMax: v2.global.touchSizeMax))
         }
         return AppConfig(version: 3, global: v2.global, regions: v2.regions,
                          gestures: gestures, events: v2.events)
@@ -147,10 +241,14 @@ public enum ConfigStore {
 
         let leftGesture = GestureConfig(name: "左侧", regionID: left.id, eventID: brightness.id,
                                         timeline: TimelineMigrator.migrate(pipeline: leftPipeline, event: brightness,
-                                                                           regionID: left.id, eventID: brightness.id))
+                                                                           regionID: left.id, eventID: brightness.id,
+                                                                           touchSizeMin: global.touchSizeMin,
+                                                                           touchSizeMax: global.touchSizeMax))
         let rightGesture = GestureConfig(name: "右侧", regionID: right.id, eventID: volume.id,
                                          timeline: TimelineMigrator.migrate(pipeline: rightPipeline, event: volume,
-                                                                            regionID: right.id, eventID: volume.id))
+                                                                            regionID: right.id, eventID: volume.id,
+                                                                            touchSizeMin: global.touchSizeMin,
+                                                                            touchSizeMax: global.touchSizeMax))
         return AppConfig(version: 3, global: global, regions: [left, right],
                          gestures: [leftGesture, rightGesture], events: [volume, brightness])
     }
@@ -171,5 +269,23 @@ public enum ConfigStore {
 
     public static func clearUserDefault() {
         try? FileManager.default.removeItem(at: userDefaultURL)
+    }
+
+    // MARK: - 手指尺寸同步（全局 touchSize 是唯一事实来源，finger 节点参数跟随，含递归子图）
+
+    static func syncingFingerSizes(_ timeline: TimelineConfig,
+                                   sizeMin: Float, sizeMax: Float) -> TimelineConfig {
+        var tl = timeline
+        for i in tl.nodes.indices {
+            if tl.nodes[i].type == .finger {
+                tl.nodes[i].params.touchSizeMin = sizeMin
+                tl.nodes[i].params.touchSizeMax = sizeMax
+            }
+            if var sub = tl.nodes[i].subgraph {
+                sub = syncingFingerSizes(sub, sizeMin: sizeMin, sizeMax: sizeMax)
+                tl.nodes[i].subgraph = sub
+            }
+        }
+        return tl
     }
 }

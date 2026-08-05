@@ -42,7 +42,7 @@ final class GraphEvaluatorTests: XCTestCase {
         // value(5) → scale(×2) → gate(≥10) → state 记录
         let value = NodeConfig(type: .value, params: NodeParams(constant: 5))
         let scale = NodeConfig(type: .scale, params: NodeParams(multiplier: 2))
-        let gate = NodeConfig(type: .gate, params: NodeParams(threshold: 10, comparator: .gte))
+        let gate = NodeConfig(type: .gate, params: NodeParams(comparator: .gte, threshold: 10))
         let store = NodeConfig(type: .state, params: NodeParams(key: "result"))
         let timeline = TimelineConfig(trigger: .onTick,
                                       nodes: [value, scale, gate, store],

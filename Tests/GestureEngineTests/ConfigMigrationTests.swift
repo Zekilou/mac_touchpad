@@ -27,13 +27,14 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(v3.regions.count, 2)
         XCTAssertEqual(v3.gestures.count, 2)
         XCTAssertEqual(v3.events.count, 2)
-        // 每个手势都迁移出了单张图，含 4 个管道出口入口
+        // 每个手势都迁移出了单张图（v8 状态机展开：无 pipeOut，有 varRef 变量 + finger 物理层）
         for gesture in v3.gestures {
-            let triggers = gesture.timeline.nodes
-                .filter { $0.type == .pipeOut }
-                .compactMap { $0.params.trigger }
-            XCTAssertEqual(Set(triggers),
-                           Set([.onFirstTap, .onEnterHolding, .onTick, .onExitHolding]))
+            let tl = gesture.timeline
+            XCTAssertTrue(tl.nodes.filter { $0.type == .pipeOut }.isEmpty)
+            XCTAssertNil(tl.firstNode(of: .recognizer))
+            XCTAssertNotNil(tl.firstNode(of: .finger))
+            XCTAssertNotNil(tl.firstNode(of: .varRef))
+            XCTAssertNotNil(tl.firstNode(of: .touchData))
         }
     }
 
@@ -78,18 +79,16 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(leftQuantize?.params.stepNorm, 0.018)
     }
 
-    func testV1Migration_tapParamsLandsInRecognizeNode() throws {
+    func testV1Migration_tapParamsLandsInGraphThresholds() throws {
         let v1Data = try makeV1JSON()
         let v1 = try JSONDecoder().decode(ConfigStore.V1Config.self, from: v1Data)
         let v3 = ConfigStore.migrate(v1: v1)
 
         let rightGesture = v3.gestures.first { $0.name == "右侧" }!
-        let recognize = rightGesture.timeline.firstNode(of: .recognizer)
-        XCTAssertEqual(recognize?.params.tapMaxDuration, 0.2)
-        XCTAssertEqual(recognize?.params.tapMaxGap, 0.3)
-        XCTAssertEqual(recognize?.params.holdMinDuration, 0.2)
-        // 手势识别参数属性从图读取
-        XCTAssertEqual(rightGesture.tapMaxDuration, 0.2)
+        // v8：识别参数固化为图上 compare threshold（按下超时 0.2 / 保持 0.2 / 间隔 0.3；阈值节点在模块子图内）
+        let thresholds = rightGesture.timeline.allNodes.compactMap { $0.params.threshold }
+        XCTAssertTrue(thresholds.contains(Float(0.2)), "按下超时/保持时长阈值应在图上")
+        XCTAssertTrue(thresholds.contains(Float(0.3)), "间隔阈值应在图上")
     }
 
     func testV1Migration_bindingsLandsInRefNodes() throws {

@@ -7,9 +7,17 @@ import IOKit.graphics
 /// 系统控制：音量 + 亮度
 public enum SystemControl {
 
+    // MARK: - 测试钩子（单元测试注入，绕过真实系统读写）
+
+    /// 非 nil 时 getVolume 返回 mock 值（测试用；nil = 走真实系统读取）
+    static var mockVolume: Float?
+    /// 非 nil 时 getBrightness 返回 mock 值（测试用；nil = 走真实系统读取）
+    static var mockBrightness: Float?
+
     // MARK: - 音量读取
 
     public static func getVolume() -> Float {
+        if let m = mockVolume { return m }
         var devID = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         var addr = AudioObjectPropertyAddress(
@@ -32,6 +40,7 @@ public enum SystemControl {
     // MARK: - 亮度读取
 
     public static func getBrightness() -> Float {
+        if let m = mockBrightness { return m }
         var iterator: io_iterator_t = 0
         let matching = IOServiceMatching("IODisplayConnect")
         guard IOServiceGetMatchingServices(kIOMasterPortDefault, matching, &iterator) == kIOReturnSuccess else { return 0 }
@@ -51,10 +60,19 @@ public enum SystemControl {
 
     // MARK: - 媒体键事件（触发系统 HUD + 实际调节）
 
+    /// 媒体键全局节流：CGEvent.post 同步投递（时序确定、行为可预期——后台队列会乱序/延迟导致"奇怪行为"）；
+    /// 用间隔节流把按键速率压到系统能消化的水平（16 档系统一次滑动最多 16 个有效键），
+    /// 超频的按键丢弃（系统到顶后本就忽略，丢的只是多余量，避免事件风暴拖慢系统）
+    private static var lastKeyTime: Double = 0
+    private static let keyInterval = 0.02   // 两次按键最小间隔 20ms（上限 50 键/s）
+
     /// 发送系统媒体键事件（NX_SYSDEFINED, subtype=8）
     /// 这会让系统自动调节音量/亮度并显示右上角 HUD
     /// 需要「辅助功能」权限（Accessibility）
     private static func postMediaKey(_ keyType: Int32) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastKeyTime >= keyInterval else { return }   // 节流：丢弃超频按键
+        lastKeyTime = now
         // data1 格式: (keyType << 16) | (keyState << 8) | keyRepeat
         // keyState: 0x0A = keyDown, 0x0B = keyUp
         // modifierFlags 必须与 keyState 一致，否则系统不响应

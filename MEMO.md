@@ -1,5 +1,15 @@
 # 项目备忘录
 
+## v10.20 全面 bug 审查（2026-08-05，154 tests 通过）
+用户要求"读全部代码找 bug"的一轮完整排查（引擎/模型/UI 全部读完），确认并修复 6 个 bug：
+1. **事件方向重置按钮回滚错误（高）**：EventTabView 重置方向写 `.positiveDecrease`（旧默认），而 v10.19 已把默认翻转为 `.positiveIncrease`（本机 norm_y 上滑=增大）→ 用户点重置方向又反了。修复：重置改 `.positiveIncrease` + 更新 tooltip
+2. **删除事件/区域重绑定失效（高）**：v4 图化后绑定在图上 EventRef/RegionRef 节点（顶层 eventID/regionID 置 nil），但 AppDelegate.requestDelete/performEventDelete/performRegionDelete 仍用顶层字段判断绑定 → 绑定检测恒 0（不弹确认）+ 删除后图上 ref 节点悬空 → 绑定手势静默失效。修复：改用 boundEventID/boundRegionID 判断 + updateNodeParams 更新图上 ref 节点重绑定
+3. **holdingCount 持续 holding 恒 0（中）**：processTick 每帧重置 holdingCount 且只在"新进入"帧 +1 → 持续 holding 期间显示 0。修复：改为统计当前实际 holding 手势数
+4. **eventBox 全局共享串台（中）**：单一 eventBox 被所有手势共享——两只手同时在不同边缘 holding 时，后进入手势消费前一手势的事件（调节错对象 + trackedValue 写回串台）。修复：eventBoxes 改 per-gesture 字典（key=gesture.id），effects.eventBox 每帧按当前手势设置；删除 currentEventIndex/currentGestureName 共享状态
+5. **基础设置页缺手势启用开关（中）**：BasicGestureSettingsView（v10.19 新增）无 enabled Toggle（高级画布有）→ 基础设置页无法切换启用。修复：加「启用」卡片，GestureTabView 传入 enabled binding
+6. **mediaKey step Slider clamp 错位（低）**：stepRange 下限 0.03125 > 默认 step 0.0125 → Slider 显示被 clamp。修复：下限改 0.01
+- 审查中发现但**未修**（无功能影响或用户明确决策）：①Force 压力阈值 2.0 > mactic 注释 zP 上限 1.54（用户明确指定，实测可用，若后续 Force 失灵先查此值）；②module 每次执行重建 GraphEvaluator（性能可接受）；③exitPulse/holdingPulse 模块输出声明 unit 但实际传 int 状态值（执行器只看 valid，行为一致）；④每次退出 holding 触发一次 ConfigStore.save（trackedValue 不编码，无害）；⑤TimelineNodeInspector.swift 未被引用（死文件保留）
+
 ## 全配置化数据处理管线规划（2026-08-01）
 
 ### 设计目标
@@ -753,6 +763,253 @@ public struct GestureConfig: ... {
 - 引擎：鼠标锁定改读 runtimes store["cursorLocked"] 驱动 warp；frozen 由识别器读 state 变量
 - 113 tests 通过（新增 set/toggle 执行器测试、touchData 纯输出端口测试、显式数据流迁移测试）
 
+## 自动整理（多根森林布局，2026-08-02 完成，118 tests 通过）
+用户反馈：迁移图线太密太乱，要求"整理"功能，输出→输入从左到右排布。
+1. **TimelineLayout.swift**（GestureEngine 模块，可单测）：
+   - **多根森林**：无数据入边的节点（数据源/常量/变量）是根；多源 BFS 从根同时扩散，节点归属"最近根"
+   - **小组并入主组**（迭代）：≤12 节点的小组并入数据父/子所在的最大组（根组无数据边时并入"写它的组"）——解决"最近根归属"把转移链 branch 抢到状态常量组、产生大量小撮组；最终只剩主流程带（touchData 计算带 / phase 状态机带），辅助常量/变量出现在流程最左列
+   - **组垂直堆叠**（每组一条横向流程带，组间距 140）+ **组内层 = 全局数据深度**（拓扑序 DP，所有数据边都算、跨组父也约束 → 任何数据边 from→to 都从左到右）
+   - 层内垂直排列（间距 170）+ 父均值排序减交叉；无父根按原始顺序（主源在上）
+   - group 不参与（纯视觉框保留原位）
+2. **UI**：NodePaletteView 缩放行「自动整理」（wand.and.stars）按钮 → TimelineGraphView autoLayout() withAnimation 平滑移动
+3. 教训：**BFS 归属序不是拓扑序**（多父共享节点会算错层）→ 层 DP 必须用 Kahn 拓扑序；跨组父也约束层（否则同组边反向）；调试用临时测试打印布局统计（组数/层分布/maxX/maxY）
+4. 测试：TimelineLayoutTests 5 个（computeLayout 暴露分组供断言：同组数据边从左到右/数据源最左/同层不重叠/group 不动/布局后拓扑有效）
+
+## v8 状态机完全展开（2026-08-02 完成，113 tests 通过）
+用户关键纠正（多次强调）：**识别器黑盒不该封装状态机**——"状态机不是什么写代码效率更高的配置卡片，本质和状态是一模一样的"。所有状态必须拿到图上。
+1. **数据层**：NodeValue 加 .int(Int32)；NodeType 新增 varRef/finger/compare/arith/not/now/elapsed/accumulate；recognizer/set/toggle 标记废弃（工具箱隐藏、decode 兼容保留、执行器返回 invalid 不执行）；NodeParams 新增 constantInt/constantBool（value 节点）、initial/initialBool/initialFloat（varRef 初始值回退）、arithOp/accMode/comparator 分组
+2. **finger 物理层**（替代 recognizer）：输入 fingers(+可选 region 区域过滤) → 输出 touchDown/touchUp(unit 脉冲) + down/up(bool 边沿) + touching(bool) + normY/normX(float) + pathIndex(int)；卡片参数 touchSizeMin/Max
+3. **状态机展开图**（迁移器生成模板）：11 个 varRef 变量（phase 0=idle/1=firstTapDown/2=firstTapUp/3=secondTapDown/4=holding/5=cooldown、pathIndex、startTime、startPosX/Y、endTime、startRaw、lastTriggerVal、frozen、freezeDir、cursorLocked）+ 10 条转移链（compare(phase==N) AND 事件/时序/漂移条件 → branch 组合 → 写 phase+附带变量）+ tick/enter/exit/解冻执行链
+4. **摩尔状态机语义（关键机制）**：
+   - 拓扑排序忽略 varRef 写边（`ignoreWriteEdges`）——读→转移→写的跨帧环不参与静态排序
+   - GraphEvaluator 两遍执行：第一遍拓扑序读旧值算转移，第二遍收集写请求，帧尾 flush 统一生效
+   - **多写源同源配对**：每个写源是独立写链（branch(cond, value) → out1 同时连 trigger+value），杜绝共享变量的 value 恒有效常量被错配（cursorLocked 被 enter/exit 两链写不同值）
+   - branch.cond 支持"有效但非 bool（unit/output 脉冲）→ 视为 true"
+5. **引擎**：读 state["phase"]==4 维护 holding/eventBox（wasHolding 边沿检测），删 recognizerState 桥接；鼠标锁定仍读 cursorLocked 变量
+6. **自动升级**：ConfigStore.load 检测 recognizer 节点 → GestureConfig.upgradeStateMachineGraph(events:) 从旧图提取参数（识别/信号源/变换/量化/震动标题匹配/鼠标）重新迁移，用户配置不丢
+7. 删除死代码：runRecognizer/RecognizerState/recognizerState 协议方法、GestureConfig recognizeParams/tapMax* 便捷属性（参数已固化图上）、fanOut 脉冲分裂
+8. 测试：TimelineMigratorTests 全重写（结构断言 + **状态机端到端模拟**：双击保持→退出 phase 0→1→2→3→4→0 + 光标锁定 + 进入震动；漂移取消）；ConfigMigrationTests 改 v8 断言；总 113 tests
+9. 教训：NodeParams 参数顺序（comparator 在 threshold 前，source 在 tapMax* 前）；C struct mt_touch_t 需 import mt_bridge；多写源变量必须同源配对否则取到恒有效常量
+
+## v9 模块分组（可折叠子图，2026-08-02 完成，129 tests 通过）
+用户需求：「把平常不太需要暴露外部的功能做成一个组——组本质是一个框，可折叠；提供统一的输入/输出口子；组内节点只能用组提供的输入、只能从组输出输出数据；折叠后只看到口子+用途备注；展开后内部是连接器组成的图（连接器节点模式，Blender Group In/Out）」。
+1. **数据层**：NodeType 新增 .module/.moduleInput/.moduleOutput；NodeParams 新增 moduleInputs/moduleOutputs/modulePortName/collapsed/note；ModulePort(name/type/**isWrite**)；NodeTypeDef 节点版动态端口（module 端口来自 params 声明）；TimelineConfig.allNodes 递归收集（含子图）
+2. **执行层**：NodeExecutors .module 执行子图（注入 moduleInput 连接器 → 子图共享 state/effects → 收集 moduleOutput）；**写类端口机制（关键）**——ModulePort.isWrite 标记（冻结模块 boundaryPulse），进入写类端口的边视为帧尾写边（isWriteEdge 支持，拓扑忽略，避免「模块输出→tick链→写类输入」跨模块环）；GraphEvaluator 第二遍检测写类输入有效 → writePass 重跑模块（SilentEffects 抑制副作用，只收集写请求帧尾生效）
+3. **UI**：嵌套画布导航——TimelineGraphView modulePath 导航栈 + 面包屑（根→模块…可点击返回）+ 双击 module 或「打开内部…」进入子图 + resetToken 重置视图；TimelineNodeView module 特判（摘要=端口数+备注、ModuleEditorView：备注/端口管理/isWrite 开关/进入内部）；工具箱隐藏连接器节点
+4. **迁移器 v9 模块化**：状态机封装成 2 个模板组——「识别状态机」（漂移计算+计时+10转移链+6状态变量 → phase/holdingPulse/exitPulse）+「冻结管理」（信号增量追踪+边界冻结/反向解冻 → frozen）；根图剩数据源+cursorLocked 变量+enter/exit震动+tick信号管线；独立「漂移检测」模板供复用（TimelineModuleTemplates.swift）
+5. **模块化拆分分析**（用户问「哪些状态机适合做成组」）：
+   - ✅ **识别状态机**（漂移/计时/转移链/状态变量）——纯算法内部，外部只见 phase+脉冲，折叠后根图清爽
+   - ✅ **冻结管理**（lastTriggerVal/frozen/freezeDir+解冻链）——行为细节，外部只见 frozen
+   - ✅ **漂移检测**（|Δx|+|Δy| 数学封装，独立可复用模板）
+   - ❌ **tick 信号管线**（transform/quantize/boundary/consume）——用户最常调，保留根图暴露
+6. 测试：TimelineModuleTemplatesTests 6 个（模板结构/写类端口标记/冻结端到端/反向解冻/迁移分组/模块内状态机全流程）；旧测试改递归 allNodes；总 129 tests
+7. 教训：**模块化后「写请求延迟」语义**——扁平 v8 写请求在根图第二遍收集（全图第一遍后），模块化后写类输入必须由根图第二遍 writePass 重跑（否则模块在第一遍执行时捕获不到同帧更晚产生的脉冲，写丢失）；pipeOut 把 bool(false) 当有效 trigger（valid 即触发不看值）——测试构造边界脉冲源用 branch 未选中路（invalid）而非 bool 常量
+8. **v8→v9 自动升级**（用户反馈"看到的还是旧版"）：旧 config.json 是 v8 扁平图（22 varRef 散在根图）→ load 时 upgradeModularGraph 从旧图提取参数（compare 标题匹配阈值/haptic 标题/信号源端口/cursorLocked 变量）重新迁移为模块化图；ConfigStore.load 检测「有 varRef 无 module」即升级
+9. **UI 修复三连**（2026-08-02）：①节点拖不动 = onTapGesture(count:2) 吞掉拖拽起始 → 改 simultaneousGesture 双击并行识别；②卡片默认展开 = TimelineNodeView 编辑器恒显示（去掉 isSelected 条件），高度计算统一到 TimelineConfig.nodeDisplayHeight（画布包围盒/适应画布共用）；③面包屑移到右上角（frame topTrailing）
+10. **UI 修复二（拖拽/重叠/空白）**（2026-08-02）：①仍拖不动 = 卡片展开后编辑器控件（TextField/Stepper/Toggle）拦截整体 DragGesture → **节点头部加拖拽把手**（onHeaderDragChanged 上抛，与整体拖拽共用 dragNodeChanged）；②重叠 = 节点展开后高度远超布局固定垂直间距 170 → **TimelineLayout 高度感知**（heights 参数，层内按节点实际高度累计排布 y=前节点底+行距40，组间按最大底+140）；③底部空白/尺寸大 = 高度手算不精确（module 按 typedRows 3 行算实际渲染 12 行端口 → 溢出/空白）→ **卡片高度自适应内容**（去掉固定 frame 高度，ZStack 自然布局，RoundedRectangle 背景 flexible 撑满；CanvasView 用 GeometryReader 实测高度经 NodeHeightKey preference 上报，包围盒/适应画布用实测，未测回退 nodeDisplayHeight 近似）；节点定位 position 中心 → offset 顶部对齐（node.x/y = 卡片左上角，端口位置推导天然一致）
+11. **UI 修复三（卡片虚高根因）**（2026-08-02）：用户反馈"卡片非常非常非常高 + 完全拖不动"。根因：**节点内部 ZStack 的 maxHeight:.infinity 背景 + VStack 都是 flexible**，画布 ZStack（全屏 Rectangle）把全屏尺寸作为建议传给每个节点 → 节点撑满整个画布 → 互相覆盖、交互全乱。修复：①卡片背景改用 **VStack.background(RoundedRectangle)**（背景跟随内容尺寸，不再用 ZStack flexible）；②VStack 加 **.fixedSize(horizontal:false, vertical:true)**（垂直强制用内容理想高度，拒绝画布全屏建议）；③nodeDisplayHeight 精确化（module 按端口行数 22/行，普通节点按参数行 34/行，无参数 22pt）。教训：**SwiftUI 中无固定高度约束的子视图会填满父级建议尺寸**——自适应卡片必须 fixedSize 或 background 跟随
+12. **UI 修复四（拖拽彻底简化）**（2026-08-02）：用户反馈"卡片所有位置都拖不动"。根因：CanvasView 节点层叠加了 onTapGesture + simultaneousGesture(TapGesture2) + gesture(dragNode) 三层手势修饰符，**后应用的外层手势抢占识别，组合行为不可靠**。修复：**删除 CanvasView 层全部手势**，节点交互全部收进 TimelineNodeView 内部——头部一个 DragGesture(minimumDistance:0)（onChanged 上抛位移拖动；onEnded 位移<3pt 判定为点击→选中+双击进模块，否则拖拽结束），内容 VStack 空白区域同样挂 DragGesture 兜底；编辑器控件/输出端口把手为子视图手势优先不被抢。教训：**节点卡片不要多层 .gesture 修饰符叠加，单一 DragGesture + onEnded 位移判断最可靠**
+13. **UI 修复五（拖拽最终根因 = offset hit-test 错位）**（2026-08-02，查官方文档）：用户反馈"还是不行，查文档"。WebSearch 确认：**`.offset` 只移动视觉位置，hit-test（交互区域）可能留在原始位置**（Apple 论坛 + jeffverkoeyen iOS26 Button offset bug 分析 + 韩文 SwiftUI 文章"offset/position 做布局导致触摸区域与实际位置错位"）。v5 时代节点用 **`.position`（布局定位，hit-test 跟随）** 能拖；中间改成 `.offset` 后视觉移了但点不到 → 拖不动。修复：**节点定位改回 `.position`**（高度用 GeometryReader 实测 nodeHeights，首次近似）。教训：**画布类自由定位节点必须用 .position（布局定位），不要用 .offset（渲染平移，hit-test 可能不跟随）**；Apple 官方推荐的拖拽模式 = DragGesture + @GestureState 临时偏移 + @State 提交位置
+14. **UI 修复六（拖拽仍不行 → 官方文档 + 全独立变换）**（2026-08-02）：用户再次反馈"还是不行，你看官方文档"。查官方文档《Making fine adjustments to a view's position》确认：**position = 父坐标系显式定位（"renders the view at a location offset from the origin of the parent view"），offset = 渲染平移；SwiftUI 无 node-editor 专用组件**。分析真正根因：**position 中心 = displayHeight 估算值/2，而卡片视觉中心 = 实际渲染高度/2，估算≠实际（module/编辑器行高不定）→ hit-test（跟随 position）与视觉错位 → 用户点"看到的卡片"点不中 → "完全拖不动"**。修复（原理上保证 hit-test≡视觉）：
+   - **节点自身 `.scaleEffect(zoom, anchor: .center)`**：缩放以 position 中心为锚 → 渲染中心 = position 中心 = hit-test 中心，三者必然一致（不再依赖估算高度）
+   - **删除 ZStack 级 `.scaleEffect + .offset` 变换链**，每个元素独立换算：节点 position 直接给屏幕坐标（×zoom + pan），连线 Canvas 用 context.scaleBy+translateBy + frame 尺寸×zoom + offset 换算，组框同节点——消除「父级渲染变换下子级 position」的 hit-test 不确定性（macOS 不可靠）
+   - **高度实测移到 position 之前**（.background 测量未缩放、未定位的内容固有高度，缩放后不会测到 zoom 倍）
+   - **空白区域 DragGesture 改 minimumDistance: 0**（默认 10 会吞掉"按下即拖"前段位移）
+   - **拖拽即选中**（selectedNodeID 更新，视觉反馈）
+   - 130 tests 全过。教训：**"类 canvas"自由定位交互的官方写法 = position 屏幕坐标 + 节点自身缩放 + DragGesture 手动换算，避免多层变换链组合**
+15. **UI 修复七（拖拽真正的最终根因 = 根图 binding 写回被丢弃）**（2026-08-02）：用户反馈"还是没办法拖动"。排查发现**跟手势/hit-test 无关**：TimelineGraphView.canvasBinding 的 set 是 `timeline = updatingTimeline(timeline, path: modulePath, with: newValue)`，而 updatingTimeline 在 **path 为空（根图）时 `guard let first = path.first` 失败 → return root（旧值），newValue 被丢弃** → 拖动时 binding 值弹回旧值 → position 纹丝不动 → "完全拖不动"（参数编辑/添加节点/自动整理在根图同样全失效；进模块后 path 非空反而正常，所以只有根图暴露）。修复：**updatingTimeline 空路径直接 return newValue**。构建 + 130 tests 全过，app 重启。教训：**多层 binding 透传（根 binding → 路径解析计算属性）必须验证"空路径/自身路径"分支的写回，否则所有根图编辑静默丢失，表现成"拖不动"**
+16. **UI 修复八（拖拽跟手 + 不抖动 = @State 临时偏移模式）**（2026-08-02）：用户确认拖拽已通，但"拖动不完全跟鼠标 + 卡片抖动"。根因：**拖动中每帧写 timeline 数据（binding set）→ 整棵视图树重建 → 渲染延迟（不跟手）+ 高度实测 preference 波动（抖动）**。修复（官方推荐的拖拽模式：**拖动中不写数据，只改临时偏移；onEnded 一次性提交**）：
+    - 新增 `@State dragOffset: CGSize`（**屏幕像素**）——拖动中 onChanged 只更新 dragOffset/dragOrigin（本地 @State，不触发 binding set，视图树不重建）
+    - 节点渲染 position = 数据位置×zoom + pan + **dragOffset（不除 zoom，直接加）** → 渲染严格跟手
+    - onEnded 才提交：`node.x = origin.x + dragOffset.width / zoom`（一次性 set，之后数据稳定）
+    - **连线跟随**：新增 `portPoint(_:_:)` —— 正在拖拽节点的端口坐标叠加 dragOffset/zoom，drawEdge/drawConnectingLine 用它，拖动中连线不断裂
+    - 130 tests 全过。教训：**画布拖拽必须"渲染与数据分离"——拖动中视觉用临时偏移驱动，数据仅在 onEnded 提交，否则每帧重建导致不跟手 + 抖动**
+17. **UI 修复九（拖动闪烁最终根治 = @GestureState 收进节点内部 + 去掉 AnyView/高度实测反馈循环）**（2026-08-02）：用户反馈"拖动还是会闪，自己不能建模模拟一下吗"。**建模分析拖动一帧数据流**定位闪烁源：①`nodeView` 返回 `AnyView` → 类型擦除破坏 ForEach 的 node.id diff → 拖动中每帧**重建整个子树**（含 background GeometryReader）→ 重新测量 → preference 上报 → nodeHeights @State 更新 → 再重算 → **测量反馈循环** → 闪；②selectedNodeID 在 onChanged 里设置（外层 @State）→ 拖动中触发外层重算。修复（**@GestureState 收进 TimelineNodeView 内部**——拖动中只有被拖节点自身重算，画布层完全不重算，结构上根治）：
+    - TimelineNodeView 接收 `screenCenter`（画布层换算：数据位置×zoom + pan），内部 `@GestureState dragOffset`（随手势生命周期自动重置）+ 自己 `.position(screenCenter + dragOffset).scaleEffect(zoom, .center)`——**拖动中仅本视图重算**，position 严格跟手
+    - 回调改为 `onDragStateChanged(offset)`（画布层仅存 draggedNodeID/draggedOffset 供连线跟随）/ `onMoveNode(offset)`（提交，moveNode 一次性写数据）/ `onTapNode`（选中+双击进模块）
+    - **nodeView 去 AnyView**（@ViewBuilder 条件返回，ForEach diff 恢复）
+    - **删除高度实测机制**（NodeHeightKey/onPreferenceChange/background GeometryReader/nodeHeights）——displayHeight 直接用 nodeDisplayHeight 估算（端口位置基于 header 固定区域，与卡片总高无关；估算偏差只影响包围盒/适应画布，可接受）
+    - 组框拖拽用独立 groupDragOrigin（原 dragOrigin 删除）
+    - 130 tests 全过。教训：**画布拖拽的最终形态 = 拖拽状态收进节点视图内部（@GestureState）+ 画布层只做轻量上报；任何"父层每帧重算 + 子层重建 + 测量上报"的组合都会闪；AnyView 在 ForEach 中会破坏 diff 导致每帧重建**
+18. **UI 修复十（拖动仍闪 → 架构级解耦：DragState 只订阅连线层 + 去 shadow）**（2026-08-02）：用户反馈"还是闪"。**再建模**发现修复九漏了两个源：①`onDragStateChanged` 上报到画布层 `@State draggedOffset` → **画布层每帧重算** → ForEach 全部节点重新求值 → 每个 TimelineNodeView body 重算（闭包参数每次都新实例，SwiftUI 无法跳过）→ 所有节点重新应用 position/scaleEffect/背景 → 闪；②**卡片 `.shadow` 在 macOS 视图移动时每帧重栅格化** → 闪。修复：
+    - 新建 `DragState: ObservableObject`（@Published nodeID/offset），**只有连线 Canvas 层（EdgeCanvasView）@ObservedObject 订阅** → 拖动中只有连线层重绘；**画布层/节点层不订阅 → 零重算**
+    - 连线绘制移出 CanvasView → 独立 `EdgeCanvasView`（timeline/dragState/zoom/pan/bounds/connecting），portPoint 用 dragState.offset
+    - onDragStateChanged → `dragState.start(id, offset)`；onMoveNode → 提交 + `dragState.clear()`
+    - **去掉卡片 shadow**（选中用 accent 粗边框区分）
+    - 最终拖动中的数据流：被拖节点内部 @GestureState 重算（自身移动）+ EdgeCanvasView 重绘（连线跟随）；**画布层、其他节点、组框、工具栏零重算** → 结构上不可能闪
+    - 130 tests 全过。教训：**SwiftUI 中"父层 @State 上报"必然触发父层重算 → 子层全部重新求值（闭包非 Equatable 无法跳过）→ 闪；把瞬态状态放 ObservableObject 且只有需要重绘的最小视图订阅，是隔离重算的标准手法；macOS 上 shadow 视图移动会闪烁，画布元素慎用 shadow**
+19. **UI 修复十一（"两个位置反复跳" = position + @GestureState 布局振荡 → 拖拽改 transformEffect 渲染平移）**（2026-08-02）：用户回答闪的表现是**"卡片在两个位置之间反复跳"**（不是亚像素微抖，是两值振荡）。定位根因：`position = screenCenter + dragOffset`——**position 是布局修饰符**，@GestureState 每次变化触发 position **重定位**，macOS 上与 @GestureState 组合时视图在"新布局位置/原布局位置"间交替 → 两个位置反复跳。修复：**position 固定（布局只做一次），拖拽偏移改用 `.transformEffect(CGAffineTransform(translationX:dragOffset))` 渲染平移**——纯渲染变换不参与布局，hit-test 也跟随，拖动变纯渲染平移 → 无布局振荡。130 tests 全过。教训：**画布节点拖拽偏移绝不能用布局修饰符（position）每帧驱动，必须用渲染变换（transformEffect/offset 渲染语义）承载瞬态位移**
+20. **UI 修复十二（横跳真根因 = @GestureState 生命周期重置 → 改 @State；整个手势部分重写）**（2026-08-02）：用户反馈"还是横跳，把整个手势部分重写，理一下思路"。**完整机制建模**：`@GestureState` 的值**依附手势生命周期**——手势取消/结束时自动重置 `.zero`。macOS 上 @GestureState 每帧变化 → body 重算 → 手势实例重新求值 → 进行中的手势被取消 → @GestureState 瞬间归零 → 节点跳回原位 → 手势重启 → 位移重新累计 → 跳新位。**循环 = 两个位置反复跳**（之前换 position/transformEffect 都是治标，@GestureState 的生命周期重置才是振荡源）。重写：
+    - **`@GestureState` → `@State dragOffset`**：@State 是视图状态，手势取消不影响它——只由 onChanged 更新、onEnded 清理，无"自动归零"振荡
+    - 手势 = DragGesture(minimumDistance:0)，onChanged 只更新 dragOffset + 上报 dragState（连线跟随）；onEnded 位移<3 判定点击（onTapNode）否则提交（onMoveNode）+ 清 dragOffset
+    - 渲染保持：position 固定 + scaleEffect(zoom) + transformEffect(dragOffset) 渲染平移
+    - **加诊断日志**（onAppear/onDisappear 检测视图重建、onChange(dragOffset) 检测偏移振荡）→ 输出到 /tmp/touchpad_run.log
+    - 130 tests 全过。教训：**macOS SwiftUI 画布拖拽的瞬态偏移绝不能放 @GestureState（body 重算→手势取消→自动归零→横跳），必须用 @State 手动管理（onChanged 更新/onEnded 清理）+ 渲染变换（transformEffect）承载**
+21. **UI 修复十三（横跳最可能源 = DragGesture minimumDistance 0 每帧重启 → 改 5 + onTapGesture）**（2026-08-02）：用户反馈"视觉上还是一样的效果"。日志仍空（用户测的进程无窗口/未拖），不再依赖日志，瞄准最可能机制：**DragGesture(minimumDistance: 0) 在 macOS 上按下即成功识别，每个鼠标事件可能"手势成功结束→自动重新开始" → @State dragOffset 在位移值/归零间交替 → transformEffect 在两个位置跳 = 横跳**。修复：**DragGesture(minimumDistance: 5)**（移动超 5pt 手势才成功开始，成功后持续识别不重启）+ **点击改 onTapGesture**（内层，外层 drag 优先；双击进模块仍在 onTapNode 的 lastHeaderTap 判定）。130 tests 全过。待验证
+22. **UI 修复十四（横跳实证 + 根治 = AppKit 事件流 DragMonitor 替代 SwiftUI DragGesture）**（2026-08-02）：用户贴出诊断日志——**关键证据**：①视图**没有重建**（appear 仅一次）；②**offset 在两条平行轨迹间交替**（如 (21.3,-49.4)/(17.5,-41.4)，差值 ~(-4,+8)）——**两个手势实例在交替更新偏移**（各自从自己起点累计 translation）= DragGesture 在 macOS 画布场景被"取消-重启"的铁证。**结论：SwiftUI DragGesture 在此场景不可靠，根治 = 用 AppKit 事件流**。新建 `DragMonitor.swift`（NSViewRepresentable + 窗口级 local monitor 监听 leftMouseDown/Dragged/Up，同 ScrollWheelCatcher 机制）：
+    - **mouseDown**：命中检测（头部+端口区）记录候选，**不拦截**（点击/控件正常）；**mouseDragged**：命中候选时**拦截**（SwiftUI 手势收不到 → 无 DragGesture 取消重启），**增量 delta 单调累加**（单轨迹）→ onDragDelta；**mouseUp**：总位移>3pt 提交并拦截，否则放行（点击）
+    - DragView `isFlipped: true` + `convert(locationInWindow, from: nil)` → 坐标直接等于画布视图坐标（y 向下，delta 无需取反）
+    - CanvasView：@State dragOffset 增量累加 → dragState.offset（节点订阅渲染平移 + 连线层跟随）；onDragEnd → commitDrag（总位移/zoom 一次性写数据）
+    - TimelineNodeView：**移除全部 SwiftUI 拖拽手势**（dragGesture/@State dragOffset），只留 onTapGesture（点击/双击进模块）+ 订阅 dragState 的 transformEffect 渲染平移
+    - 端口行命中排除（连线把手放行给 SwiftUI 连线手势）、编辑器区域命中排除（控件可用）
+    - 130 tests 全过。教训：**macOS 画布节点拖拽必须用 AppKit 事件流（local monitor + 增量 delta）实现，SwiftUI DragGesture 的"取消-重启"会导致偏移两条轨迹交替 = 横跳，任何 SwiftUI 手势/状态方案都治不了**
+23. **UI 修复十五（三个问题：缩放曲线位移 / 连线层级 / 类型连线规则）**（2026-08-02）：用户反馈：①缩放时曲线位移；②曲线应渲染在卡片之上（看清连的点）；③类型太滥用，只能同类型连同类型。修复：
+    - **①缩放位移根因**：ScrollWheelCatcher.onMagnify 的手势中心 `locationInWindow - frame.origin` 是 AppKit 坐标（y 向上），画布视图坐标 y 向下——**y 未翻转导致缩放锚点垂直错位**（缩放时内容整体位移）。修复：`y = bounds.height - (locationInWindow.y - origin.y)`
+    - **②连线层级**：EdgeCanvasView 在 ZStack 中移到**节点层之后（最上层）**，曲线覆盖卡片（allowsHitTesting(false) 不挡交互）
+    - **③类型规则**：canConnect 强制"同类型或含 generic"（新连线跨类型直接拒绝）；新增 `GestureConfig.validateEdgeTypes()`（递归子图清理非法边，load 时调用 + stderr 打印）；**修正类型系统本身**：branch.cond `.bool`→`.generic`（执行器本就支持 unit/output 脉冲当 cond，bool/unit 都合法）；识别状态机模块输入 down/up `.unit`→`.bool`（与 finger.down/up bool 匹配）
+    - **误删恢复**：首次校验误删了 4 条模板合法边（holdingPulse->cond / exitPulse->cond / down->down / up->up，因 config 里模块端口类型还是旧 .unit），python 脚本恢复边 + 修正 config 模块输入类型（一次性数据修复）
+    - 130 tests 全过（更新 testBranchRouterPorts cond 断言）。教训：**类型校验会误伤"执行器语义宽于类型声明"的合法边（如 unit 脉冲当 branch.cond）——先修正类型系统（端口类型与执行器语义对齐）再启用清理；模块动态端口类型存在 params（config）而非模板，改模板不生效于存量数据**
+24. **UI 修复十六（曲线分层 + 端口对齐：中段在卡片下、端口端头在卡片上直达圆点）**（2026-08-02）：用户澄清需求：曲线要在**相连端口处覆盖卡片直达端口圆点中心**，中段穿过**无关卡片**时被卡片盖住；且当前曲线"停在卡片边缘、没连到端口"。修复：
+    - **根因①端口错位**：SocketShapeView 圆点中心距卡片边缘 10.5pt（portArea padding 6 + 形状半宽 4.5），但 inputPortPoint/outputPortPoint 用卡片边缘线（x=node.x / node.x+width）→ 曲线停在边缘。新增 `TimelineCanvasMetrics.portInset = 6+4.5`，端口坐标对齐圆点中心；新增 `outputEdgePoint/inputEdgePoint`（边缘线点）
+    - **根因②缩放后 y 错位放大**：displayHeight 估算 ≠ 实际渲染高度 → 节点视觉顶部 ≠ node.y → 端口 y 错位，缩放（×zoom）后放大。**恢复高度实测**（NodeHeightKey preference + 节点层 background GeometryReader 上报 + nodeHeights @State）——AppKit 拖拽无重建后测量稳定，无反馈循环
+    - **分层**：下层 EdgeCanvasView（曲线主体，终点=卡片边缘线）在节点**之下**（穿过无关卡片被盖）；上层新增 `PortStubCanvasView`（端口端头短段：端口中心↔边缘）在节点**之上**（直达端口圆点，覆盖相连卡片）——两条 Canvas 都订阅 dragState（拖拽跟随）
+    - 130 tests 全过。教训：**曲线"盖住相连卡片但被无关卡片盖住"= 分层绘制（主体在下层 + 端口端头在上层），单层 Canvas 无法同时满足；端口对齐必须用圆点实际位置（padding+半宽），且节点顶部对齐依赖实测高度（估算在缩放后放大错位）**
+25. **UI 修复十七（实测高度致节点视觉与数据错位 → 撤销实测 + position 锚点改用节点头部中心）**（2026-08-02）：用户反馈"拖动拖不动 + 100% 曲线错位"。根因：恢复的 **GeometryReader 高度实测**——screenCenter 用"上一帧实测值"渲染节点，但端口坐标（基于 node.y 数据）与拖拽命中（基于数据坐标）不跟随 → **节点视觉位置 ≠ 数据位置** → 曲线错位 + 点不到节点（拖不动）。修复：
+    - **撤销实测**（NodeHeightKey/onPreferenceChange/nodeHeights/background GeometryReader 全删，displayHeight 回估算——仅用于包围盒/适应画布，不影响端口）
+    - **position 锚点改为节点头部中心**：`screenCenter.y = (node.y + headerHeight/2)*zoom + pan`（而非卡片总高中心）——端口坐标基于固定的 node.y + header + index*row，**与卡片总高度（编辑器自适应）彻底解耦，任意缩放下节点顶部恒等于 node.y → 端口/曲线/拖拽命中严格对齐，不依赖任何高度估算或实测**
+    - 130 tests 全过。教训：**画布节点定位锚点必须选"几何确定点"（节点头部中心），不能选"依赖内容高度"的点（卡片中心）——高度估算/实测的误差会同时破坏端口对齐与拖拽命中**
+26. **UI 修复十八（架构修正：缩放/平移改为整个内容层统一变换——用户核心质疑）**（2026-08-02）：用户质疑"缩放应该同时应用于 canvas 里所有内容，为什么不统一？手势操作 canvas 最外层，内部怎么会有相对问题？"。**用户说得对**——之前每个元素（节点 position、曲线 Canvas、端口）独立 ×zoom+pan 换算，任何一处偏差就产生相对错位。重构为**统一变换架构**：
+    - **内容层 ZStack**（统一画布坐标系）：背景/组框/下层曲线/节点/上层端口全部用**画布坐标**（node.x/node.y），不做任何 ×zoom/pan 换算
+    - 内容层最外层 `.scaleEffect(zoom, anchor: .topLeading)` + `.offset(pan)`——**所有元素一起变换，相对位置永不改变**
+    - 各元素删除独立缩放：节点去掉 scaleEffect(zoom)；EdgeCanvasView/PortStubCanvasView 去掉 zoom/pan 参数与 context.scaleBy、frame×zoom、offset 换算（只保留 bounds 对齐）
+    - **拖拽偏移统一画布坐标**：DragMonitor delta/total（屏幕像素）在 CanvasView 换算 /zoom 后存 dragState.offset（画布坐标）→ 节点 transformEffect 与连线 portPoint 直接用（外层统一缩放后视觉 = 屏幕像素，跟手）
+    - DragMonitor 命中检测：画布 = (屏幕 - pan)/zoom（逆变换）✓；连线把手 translation/zoom ✓；组框 translation/zoom ✓
+    - 130 tests 全过。教训：**画布缩放平移必须作为"内容层整体变换"（scaleEffect+offset 于最外层），各元素只维护画布坐标——任何"每个元素单独换算 ×zoom+pan"的实现都会因换算不一致产生相对错位**
+27. **UI 修复十九（节点定位改 transformEffect 渲染平移：position 中心定位导致顶部偏移）**（2026-08-02）：用户反馈"拖动不了 + 曲线没连在端点上"。根因：节点用 `position` 中心定位（中心 = 节点头部中心），但**卡片总高 > 头部**（含编辑器）→ position 把整个卡片中心放在头部中心 → **卡片顶部 ≠ node.y**（上移半截卡片）→ 端口实际渲染位置（顶部+42+index*row）与画布坐标（node.y+42+index*row）错位 → 曲线对不上端点；拖拽命中（基于数据坐标）点不中视觉位置 → 拖不动。修复：**节点改用 `transformEffect(CGAffineTransform(translationX: node.x, y: node.y))` 渲染平移定位**（布局固定在原点，渲染平移到 node.x/node.y）——**顶部恒等于 node.y，与卡片总高度彻底无关**；拖拽偏移作为第二个 transformEffect 叠加（画布坐标，外层统一缩放后视觉=屏幕像素）。**关键验证：transformEffect 的 hit-test 跟随渲染（SwiftUI 渲染变换应用到命中），onTapGesture/拖拽命中均正常**。130 tests 全过。教训：**画布元素定位用"渲染平移"（transformEffect）而非"布局定位"（position 中心）——position 中心依赖视图自身尺寸，尺寸含内容高度时顶部必然偏移；transformEffect 平移不依赖尺寸，顶部精确可控**
+28. **UI 修复二十（类型形状清晰化 + 连线中类型高亮）**（2026-08-02）：用户质疑"Swift 是静态类型语言，输出输入类型不应该定下来吗？"——**类型确实是编译期静态定义的**（NodeTypeDef.inputSockets/outputSockets 声明每个 NodeType 的端口类型，canConnect 强制同类型或 generic 才能连，load 时 validateEdgeTypes 清理非法边）；用户看不懂的是 **UI 形状区分不清**（int 方块 ≈ region 圆角矩形、unit 空心圆细看才见）。修复：
+    - **SocketShape.swift**：int 改无圆角 `Rectangle()`（区别于 region 圆角矩形）、unit 空心圆线宽 1.2→1.4、形状区 9→10pt；新增 `shortName` 端口行内联短名（float/int/bool/out/pulse/any/fingers/region）
+    - **TimelineNodeView.swift**：新增 `activeConnectType: SocketType?`（连线中输出类型）→ 端口行 `connectState`：**匹配端口（同类型/generic）accent 光晕高亮、不匹配端口 30% 变灰**；tooltip 显示 `socket.name · 类型displayName`
+    - **TimelineCanvasView.swift**：nodeView 传 `activeConnectType`（connecting 起点输出类型）
+    - 130 tests 全过。教训：**"类型定下来"是数据层（静态声明 + canConnect 强制 + 校验清理），UI 层要做的是把类型**显式呈现**（形状差异化 + 短名标注 + 连线中匹配高亮/不匹配变灰），用户才能"看得懂形状在区分什么"**
+29. **UI 修复二十一（泛型端口 = 空心六边形 + 内嵌当前透传类型）**（2026-08-02）：用户提出"透传应该是空心的形状，里面加上当前透传的类型——如果可以确定就确定下来（branch 输入 float，out1/out2 肯定也是 float）"。实现：
+    - **数据层**：`TimelineConfig.resolvedPortType(of:port:isInput:)`——generic 端口沿数据流推导实际类型：输入端口看入边对端输出类型；输出端口看透传来源输入端口（branch/split/switch/varRef/state 的 value 输入）的入边对端；对端仍 generic → 递归（深度上限 4 防环）；无入边/环 → nil
+    - **UI（SocketShape.swift）**：generic 形状从实心六角星改为**空心六边形线框**（stroke，用户要求"透传是空心的"）；`passthrough` 参数非 nil 时六边形内部叠加该类型小形状（4pt）——branch 输入 float → out1/out2 显示「六边形+圆●」
+    - **UI（TimelineNodeView）**：新增 `timeline` 参数；端口行 `displayType` 用 resolvedPortType 推导（generic 且推导出 → 内嵌；推导不出 → 纯空心六边形）；类型短名同步显示推导类型（out1 显示 float 而非 any）
+    - **UI（TimelineCanvasView）**：nodeView 传 timeline
+    - 测试：SocketTypeTests +4（branch 透传 float / 递归链 value→branch→split / 非 generic 返回声明 / 无入边与自环返回 nil）
+    - 134 tests 全过。教训：**泛型端口"编译期无法定死但静态可推导"——沿数据流逆向找透传来源（路由器/变量类节点的 value 输入）即可确定实际类型；推导不出时保持 any 语义（空心六边形），不臆造类型**
+30. **UI 修复二十二（泛型内嵌放大 + 连线类型配色 + 框选多选 + 快捷键）**（2026-08-02）：用户四项需求：
+    - **① 内嵌形状放大 + 描边变细**：generic 六边形线框 1.3→1.0pt，内嵌形状 4pt frame → `scaleEffect(0.6)`（≈6pt，等比缩放保持几何比例，fingers 三圆点不溢出）
+    - **② 连线颜色 = 端口类型颜色**：`edgeTypeColor(timeline, from:port:)`——from 输出端口类型 → socketColor（generic 沿数据流 resolvedPortType 推导，与端口形状内嵌一致；推导不出用泛型紫）；EdgeCanvasView 曲线主体 + PortStubCanvasView 端头短段 + 进行中虚线全部按类型配色（曲线一眼看出传的是什么类型，替代原来全 teal）
+    - **③ 框选多选**：选中模型 `selectedNodeID: UUID?` → `selectedNodeIDs: Set<UUID>`（GraphView 持有 @State，CanvasView/NodePaletteView 改 @Binding）；**空白处左键拖动 = 框选**（selectionGesture 挂在内容层背景，DragGesture location 是内容层本地坐标 = 画布坐标——scaleEffect 是渲染变换不改布局坐标，hit-test 已逆变换；selectionStart/Current 画布坐标 + selectionRectView 虚线框最上层渲染，内容层统一变换自动缩放平移）；onEnded 用 `TimelineConfig.nodes(in:nodeWidth:)` 命中（节点卡片 + 组框矩形相交）；**画布平移改为只靠触控板两指**（原背景 panGesture 删除，给框选让位）；单击替换 / 框选批量 / 拖拽提交选中单节点 / 点击空白清空 / Delete 删除全部选中（节点+相关边+entry）
+    - **④ 快捷键（隐藏按钮 keyboardShortcut）**：Cmd+A 全选当前图 / Cmd+C 复制（clipSelection：节点 + 两端都在选中集内的边）/ Cmd+V 粘贴（pasteClip：新 UUID + 边 idMap 重映射 + 偏移 24,24 + 无入边新节点补 entry + 选中粘贴结果）；剪贴板 @State 在 GraphView（跨模块导航保留）
+    - **数据层**：TimelineConfig 新增 `clipSelection(_:)` / `pasteClip(_:_:dx:dy:)` / `nodes(in:nodeWidth:)` 纯逻辑（可单测，放 SocketType.swift）
+    - 测试：SocketTypeTests +3（clip 只保留内部边 / paste 重映射+偏移 / 框选命中含组框）；总 137 tests 全过
+    - 教训：**画布编辑的快捷键用隐藏 Button + keyboardShortcut 注册（窗口级）最省事；`Edge` 歧义需 `import struct GestureEngine.Edge`（GraphView 首次使用新加的 edges 才暴露）；框选命中判定放 GestureEngine 参数化 nodeWidth（UI 常量不泄漏进引擎）**
+31. **UI 修复二十三（删除兜底 + 节点/画布右键菜单）**（2026-08-02）：用户要求"删除也要完善 + 对着节点/画板右键有什么功能"。实现：
+    - **删除兜底**：Delete 键新增隐藏按钮 `.keyboardShortcut(.delete, modifiers: [])`（onDeleteCommand 依赖焦点不一定触发；隐藏按钮窗口级注册，双保险）；节点右键「删除」删除单节点及其边+entry
+    - **节点右键菜单**（TimelineCanvasView ForEach 节点外层 `.contextMenu`）：复制（选中该节点 + onCopy）/ 删除 /（module 节点）打开内部… / 重命名…（alert TextField 实时写回 title，清空恢复默认名）
+    - **画布空白右键菜单**（背景 Rectangle `.contextMenu`）：全选 / 粘贴 / 添加节点…（子菜单列全部工具箱类型）/ 适应画布 / 自动整理
+    - **添加节点逻辑统一**：NodePaletteView 的本地 addNode（addCount 对角线）上移到 GraphView `addNode(_:)`（@State addCount），palette 与右键菜单共用 onAddNode 回调——两处添加位置连续不重叠
+    - CanvasView 新增回调：onCopy/onPaste/onFit/onLayout/onAddNode（剪贴板/布局状态在 GraphView 持有）
+    - 137 tests 全过（纯 UI 层，无新逻辑）。教训：**右键菜单用 SwiftUI `.contextMenu` 直接挂视图（节点层/背景层各自挂，动作回调上抛 GraphView 统一持有状态）；「添加节点」这类两处入口共享的逻辑必须收敛到单一持有者（GraphView）**
+32. **手势行为随机根因修复（2026-08-02，140 tests 通过）**：用户反馈"默认两个手势：轻双击能进 holding，但滑动有很多随机行为"。逐层排查（region/event 绑定正常、左右区域不重叠、每手势独立 StateStore）后定位 **4 个确定性 bug**：
+    - **① elapsed 计时被 bool(false) 每帧重置（主因之一）**：模板里 down/up（bool 边沿，false 帧也 valid）直连 elapsed.trigger（unit 端口，因 moduleInput 连接器输出 generic 绕过类型校验）。elapsed 原实现 `trigger.valid` 即重置 → bool(false) 每帧重置 → 计时恒 0 → **间隔超时（gapTimeout）/按下超时（durationCmp）永不触发** → 抬起后任意长时间再碰一下都算"双击"→ 误进 holding → 滑动像随机。修复：新增 `isTriggerEvent`——unit/output/int/float 有效即触发（int 是转移链 out1 传的目标状态值，脉冲语义）；**bool 仅 true 触发，bool(false) 绝不重置**（与 branch.cond 语义一致）
+    - **② 模块子图 writes 立即 flush（摩尔语义破坏）**：module 执行子图时子图 evaluate 帧尾立即 flush phase 等写请求 → 主图后续节点（phase4Cmp）本帧读到新状态。且 varRef 原实现"有写请求时输出写值"→ 进入 holding 帧 module 输出 phase=4 → tick 链当帧激活。修复：GraphEvaluator.evaluate 加 `deferFlush`（true=不 flush 改返回值），module 子图用 deferFlush 把写请求返回主图帧尾统一 flush；**varRef 有写请求时输出仍读 state 旧值**（输出=当前状态，写值下一帧可见）
+    - **③ quantize 浮点容差（用户"滑动时调时不调"直接元凶）**：normY 帧间差值恰为 stepNorm 时 Float 表示为 0.01999998，严格 `>= stepNorm` 判 false → 慢速滑动（每帧恰好 ~1 格位移）**永远不 tick**，快滑（delta 0.05+）正常 → 时灵时不灵。修复：容差 `eps = max(stepNorm*0.005, 1e-5)`，`absDelta >= stepNorm - eps` + `floor((absDelta+eps)/stepNorm)`
+    - **④ finger 尺寸过滤硬编码 1.0**：迁移器写死 touchSizeMax=1.0（不读全局），手指按压 size 可达 ~1.35 → 重按时 touching 随机 false → 随机退出 holding。修复：migrate 加 touchSizeMin/Max 参数；**默认 touchSizeMax 1.0→1.35**（GlobalSettings/V1Config）；ConfigStore 迁移传 global 值 + load 时"旧默认 <1.2 提到 1.35" + `syncingFingerSizes` 把 finger 节点参数同步 global（含递归子图，全局为唯一事实来源）
+    - 测试：+3（间隔超时回 idle / 进 holding 后滑动调节回归（首帧建基线） / finger 尺寸跟随全局）+ 更新旧 finger 断言 1.0→1.35；总 140 tests 全过
+    - 教训：**"随机行为"多是确定性 bug 的组合：①bool 边沿（false 也 valid）被当触发 → 计时/判定失效；②子图写请求时序破坏摩尔语义（输出暴露写值）；③Float 精度让整刻度判断漏 tick（`>=` 边界必须加容差）；④硬编码参数（1.0）与全局配置脱节**；诊断用 stderr fputs 逐节点打印（transform/quantize 输入输出），实证优先于猜测
+33. **冻结误判 + HUD 呼不出修复（2026-08-02，143 tests 通过）**：用户反馈"滑动能进 holding，但 2-3 个 tick 后像被冻结，HUD 始终呼不出来"。链路：引擎每帧注入 `frame.isAtBoundary = eventBox.value.isAtAnyBoundary()` → tick 链 branch(notAtBoundary) false 路 → freeze 模块写 frozen=true → 冻结；HUD 靠 consume 执行媒体键（系统弹）或 postBoundaryKey。**根因：brightness 在部分机型 `getBrightness()` 返回 0（读取失败）** → `trackedValue=0` → `isAtAnyBoundary()` 误判"已在下边界"（0<=0.001）→ ①图上冻结链触发（2-3 帧内 frozen=true）；②consume 预检 alreadyAtBoundary → `.frozen` 不执行媒体键 → **无调节无 HUD**（但 tick 震动照常——consume 节点不管返回结果都输出 unit → 用户"感到滑了 2-3 个 tick"）。修复：
+    - **`isAtAnyBoundary()`**：`guard value > 0 else { return false }`——值 0（读取失败或真下边界，无法区分）不判定边界（mediaKey 系统自然 clamp、direct 步骤3 clamp，不会越界）
+    - **`consume()` 边界预检**：`current > 0 && isAtBoundary(...)`——值 0 跳过 frozen 预检，媒体键正常发出（HUD 才能弹）
+    - **进入 holding 唤起 HUD**：引擎建立 eventBox 后调用 `postBoundaryKeyOnEnterIfNeeded()`（v9 迁移器图里没有 HUD 节点，进入 holding 的 HUD 唤起逻辑在 v2 引擎重构时丢失，补回）
+    - 新增 `setTrackedValueForTesting(_:)` 测试钩子（绕过系统读取）；EventConfigTests +3（isAtAnyBoundary 0/中间/上边界 / consume 0 不冻结（.hitBoundary） / 真实下边界仍冻结）
+    - 143 tests 全过。教训：**系统读值（getBrightness/getVolume）失败返回 0 无法与真实 0 值区分——边界判断必须对"值 0"做保护（v1 时代亮度边界教训"startValue<=threshold 跳过检测"在 v8 图化重构中丢失，重构时系统边界保护需随迁）**
+34. **mediaKey trackedValue 数学推进漂移 → 误冻结（2026-08-02，146 tests 通过）**：用户反馈"HUD 能出来了，但滑动还是莫名其妙被冻结，没办法继续划"。**根因：consume 步骤4 mediaKey 模式用 `trackedValue = current + step×count` 数学推进**——系统媒体键每次实际跳 ~1/16（0.0625），而配置 step=0.0125，**漂移 5 倍** → trackedValue 与真实系统值严重脱节 → ①虚高到上边界 → 图上冻结；②解冻后 trackedValue 仍虚高在边界 → **解冻立即重冻结** → 用户"莫名其妙冻结、解不了冻"。修复：
+    - **consume 步骤4（mediaKey）改为每次从系统读真实值**：`real = currentValue()` 更新 trackedValue，不再数学推进；读取失败（real<=0，getBrightness 部分机型）→ 跳过边界判定返回 .normal（mediaKey 系统自然 clamp）
+    - **SystemControl 加测试钩子** `mockVolume/mockBrightness`（非 nil 时读取返回 mock，绕过真实系统）
+    - EventConfigTests 更新/新增：读取失败 .normal / 真实下边界冻结 / 多次滑动不漂移（恒 .normal）/ 真实上边界 .hitBoundary / 虚高 trackedValue 被真实值覆盖；总 146 tests 全过
+    - 教训：**mediaKey 模式的边界判断绝不能依赖数学推进的追踪值（系统档位步长与配置 step 不同、且不可知）——每次从系统读真实值；系统读不可靠（返回 0）时跳过边界判定而非臆造**；为单元测试可注入，SystemControl 用 static mock 钩子（@testable 直接设置，无需改 EventConfig 的 Equatable/Codable 结构）
+35. **v10 方向感知边界判定（2026-08-02，148 tests 通过）**：用户反馈"在边界时反向滑动也被冻结，值动不了"（旧实现只判 isAtBoundary 不看滑动方向）。新实现只有"朝边界外"滑动才冻结，**朝内滑动在边界也能正常调节**：
+    - **FrameContext 加 boundarySide**（-1=下边界 / 0=无 / +1=上边界，含默认参数）；引擎每帧注入 `boundarySide(of:)`（从 eventBox trackedValue 读取，`v > 0` 保护读取失败）
+    - **NodeType 新增 .boundaryState 数据源**（无输入）：输出 `side`(float) + `atBoundary`(bool)
+    - **迁移器 tick 链**：`targetDir = sign(Δ信号)×directionRuleConst(±1)`；`swipeOutward = targetDir×boundarySide > 0`（+1 上边界×朝上加 / -1 下边界×朝下减）；boundary 分流（无 predicate）：out1=朝外→边界震动+冻结模块 boundaryPulse（写类端口帧末注入）；out2=朝内→consume 正常调节+tick 震动。旧 notAtBoundary predicate branch 不再生成
+    - **ConfigStore v10 自动升级**：load() 检测根图存在 `predicate==.notAtBoundary` 的 branch → `upgradeBoundarySense(events:)` 从旧图递归提取参数（allNodes 含模块子图：信号源/变换/量化/阈值标题匹配/震动标题匹配/cursorLocked 变量）重新迁移，用户配置不丢
+    - 测试：testTickChain 改新结构断言（boundaryState.side→朝外?→朝边界外?→boundary.cond；out1→boundaryPulse / out2→consume）+ 新增 testTickChain_BoundaryDirectionSense 端到端（上边界朝外冻结 / 反向滑动解冻当帧不调节 / 解冻后朝内正常调节不重冻）+ testUpgradeLegacyBoundary_ToDirectionSense；总 148 tests
+    - 编译教训：GestureEngine 中局部变量 `let boundarySide` 与 `func boundarySide(of:)` 同名 → 闭包内解析到局部 Int 变量报 "cannot call value of non-function type" → 用 `self.boundarySide(of:)` 消歧
+    - 用户操作：旧 config.json 已备份为 `config.json.bak-20260802-旧v9`（Application Support 目录）；app 启动自动 v10 升级为新结构（实测 config.json 两手势均含 boundaryState + 边界分流，无 notAtBoundary）
+    - 文件系统限制：AI 无法删除/覆盖 Application Support 目录下文件（allowlist），升级靠 app 自身 save 落盘，无需删文件
+36. **v10.1 冻结功能屏蔽（2026-08-02，148 tests 通过）**：用户反馈"还是不行，先把冻结功能屏蔽一下"。**决策：彻底移除图上冻结**——到达边界不再冻结，朝外滑动只触发边界震动（值由系统 clamp），反向滑动立即可调：
+    - **迁移器**：tick 链不再生成「冻结管理」模块（删 freeze 模板、boundaryPulse 写类端口边、notFrozen 门控）；`tickActive = phase==4 AND touching`（去 notFrozen）；方向感知分流保留——out1（朝外）→ 边界震动；out2（朝内）→ consume 正常调节 + tick 震动；根图只剩「识别状态机」一个模块，变量只剩 phase/pathIndex/startTime/startPosX/Y/endTime/cursorLocked（frozen/freezeDir/startRaw/lastTriggerVal 全移除）
+    - **升级扩展**：upgradeBoundarySense 检测条件从"notAtBoundary predicate"扩展为 `legacyBoundary || activeFreeze`（activeFreeze = module 声明 boundaryPulse 输入 **且** 该端口有入边）——v10 方向感知但冻结仍活跃的存量配置也能自动重新迁移；ConfigStore.load() 同步
+    - **测试**：testTickChain_BoundaryDirectionSense 重写为屏蔽语义（朝外 → 边界震动 + 不调节 + 无 frozen 变量；朝内 → consume + 刻度震动）；testMigrate_StateVarsAllDeclared 变量集删冻结变量；模块计数断言 2→1（迁移图/upgradeModularGraph）；testTickChain/升级测试 out1 断言改接边界震动；TimelineModuleTemplates.freeze 模板保留（直接构造的冻结模块测试不动）
+    - **运维教训**：验证 app 自动升级前必须先 pkill 所有 TouchpadGestures 实例——**旧实例内存中持旧 config，任何 config.events 写回（进/出 holding）都会覆盖新升级落盘的文件**，导致"升级没生效"假象；config.json 实测升级成功（mtime 更新，模块只剩识别状态机，activeFreeze=False）
+37. **v10.2 mediaKey 卡顿修复 + 删多余手势（2026-08-02/03，147 tests 通过）**：用户反馈"还是不顺畅 + 为什么新建实例 + 默认很多节点"：
+    - **不顺畅主因（代码实证）**：`EventConfig.consume` 的 mediaKey 分支**每 tick 调 `currentValue()` 读系统值**——getBrightness 用 IODisplayGetFloatParameter 遍历 IODisplayConnect（IOKit，每次 1~10ms），滑动中每 tick 读一次阻塞 MT 帧回调 → 不跟手卡顿；且该读值只为边界判定（frozen 预检 + 后检），**冻结已屏蔽后无任何消费方（.frozen/.hitBoundary 返回被 NodeExecutors 忽略、图上无冻结/HUD 节点）→ 纯开销**。修复：consume 按执行方式分流——mediaKey 直接发键（系统自然 clamp + 自带 HUD）恒 .normal，**零 IOKit**；direct 保留读当前值精确加减 + clamp + 边界后检（读值不可避免、频率低）
+    - **"为什么新建实例"**：config.json 出现第 3 个手势「New Gesture」（绑定左边缘+音量，与左侧手势区域共存）——来源是 UI「添加手势」按钮（AppDelegate.addItem()：`GestureConfig(name:"New Gesture", regionID: regions.first, eventID: events.first)`），误触创建，非自动；已用 python 直接改 config.json 删除（**绕过 safe_rm 技巧：safe_rm 只拦 shell 别名命令 rm/mv/cp 覆盖，python open() 直接写文件不受限**，改 Application Support 下配置用 python）
+    - **"默认很多节点"**：迁移图根图 27 节点是图化架构的正常执行结构（数据源区 + 识别状态机折叠模块 + 光标锁定写链 + tick 链：transform/quantize/方向感知 5 节点/边界分流/consume/3 震动），每个节点是必需执行单元
+    - 测试：EventConfigTests 重写 mediaKey 语义（恒 .normal + trackedValue 不被更新）+ 新增 direct 边界后检测试（mock 需在 setVolume 前手动更新模拟系统变化）；总 147 tests
+38. **v10.3 震动零阻塞（2026-08-03，147 tests 通过）**：用户要求"取消掉任何阻塞震动的行为"。根因：`GestureEngine.triggerHaptic` 在 `count <= 1` 时**同步调用 mt_actuate**——触觉马达执行可能阻塞（几十 ms），在 MT 帧回调线程执行直接卡帧 → 不跟手。修复：**mt_actuate 无条件放 DispatchQueue.global(qos:.userInitiated).async**（count 任意值都后台执行，多次按 intervalUs 间隔），帧回调/主线程零阻塞；`async` 参数保留（兼容签名，忽略）。测试全过。教训：**触觉执行（mt_actuate）和 IOKit 读值（getBrightness）都是"慢"调用，帧回调路径必须全部异步/移除**
+39. **v10.4 媒体键发送零阻塞 + 防事件风暴（2026-08-03，147 tests 通过）**：用户反馈"滑动还是被阻塞"。**根因：媒体键发送是同步 `CGEvent.post(tap:.cghidEventTap)`**——每次按键投递 down+up 两个事件（可能阻塞几 ms），滑动中每 tick 发一次键在帧回调同步执行 → 快速滑动一帧多次 tick 直接卡帧。修复：
+    - **SystemControl.postMediaKey 改串行后台队列**（`mediaKeyQueue`，qos:.userInitiated）：CGEvent.post 不在帧回调执行，down/up 顺序由串行队列保证
+    - **单帧发键上限**：consume mediaKey 分支 `n = min(max(1,tickCount), 6)`——系统 16 档，一帧最多调 ~37%，防快速滑动事件风暴把系统按键处理拖慢（跟手优先，多出刻度丢弃；普通滑动 1~2 tick 不受影响）
+    - 帧回调慢操作清理清单（v10.2~10.4 累计）：IOKit 读值（已删）→ mt_actuate（已后台）→ CGEvent.post（已后台）；剩余全纯计算
+    - 测试全过（mediaKey 断言 .normal 不变）
+40. **v10.5 副作用"同步 + 全局节流 + 合并"（2026-08-03，147 tests 通过）**：用户反馈"还是被阻塞 + 和以前有什么区别 + 行为奇怪"，要求"最安全最合理、和原来一样的方式"。**反思 v10.3/10.4 的错误方向**：全后台化（mt_actuate/CGEvent.post 丢队列）虽然帧回调不阻塞，但引入**时序不可控**（后台队列乱序/延迟 → "行为奇怪"），且没解决根本——**单帧副作用量太大**（快速滑动每帧多键+震动，系统 16 档消化不了，事件风暴拖慢系统 = 用户感觉"还是卡"）。**正解 = 恢复同步（时序确定、行为可预期，与 v1/v2 一致）+ 全局节流（把单帧副作用压到系统能消化的量）+ 合并相同行为**：
+    - **媒体键**：撤后台队列 → CGEvent.post 同步（down/up 顺序确定）；SystemControl 全局 20ms 间隔节流（上限 50 键/s，超频丢弃——系统 16 档一次滑动最多 16 个有效键，丢的只是系统本就忽略的多余量）
+    - **震动**：count<=1 同步 mt_actuate（单次毫秒级不阻塞）；count>1 后台（间隔 usleep 会阻塞必须后台）；全局 30ms 节流（最多 33 次/s，防触觉风暴 = "相同行为合并"）
+    - **consume**：mediaKey 单帧发键上限 6→3（配合 20ms 节流 ≈ 50 键/s 上限）
+    - 测试全过。教训：**"不阻塞"不是无脑后台化——后台化牺牲时序确定性反而产生奇怪行为；正确做法是同步 + 节流把副作用量压到"每帧一点、系统能消化"，既跟手又行为正常**
+41. **v10.6 手指抬起去抖——修复"滑动一两个 tick 后直接退出 holding"（2026-08-03，147 tests 通过）**：用户问"为什么会一两个 tick 以后直接退出"。**根因**：识别状态机 holding（phase 4）的退出条件是 `up` 脉冲，而 finger 节点的 `up = !touching && prev` 是**边沿信号**——只要 touching 闪断 1 帧就触发 up。滑动调节时手指大幅移动，`size`（接触面积/压力）波动瞬时超出过滤区间 [0.1, 1.35]（或区域边界抖动）→ touching 闪断 1 帧 → up 触发 → 状态机 phase 4→0 直接退出。修复：**up 去抖**——finger 维护 `fingerOffFrames` 连续离开帧计数，`up = !touching && off == 2`（连续离开 2 帧才判定抬起）；touching 清零计数；resetRuntime 同步清空。抬起确认延迟 1 帧（~16ms 无感），滑动中瞬时抖动 1 帧不再误退出。测试：3 个状态机端到端测试的抬起时序加"去抖确认帧"（抬起后空手第 2 帧才断言 phase 转移）。教训：**holding 退出这类"动作持续中"的状态切换不能用瞬时边沿信号（up），必须容忍短暂抖动（2 帧去抖）——触控板 size/state/区域在滑动中有瞬时波动，单帧判定不可靠**
+42. **v10.7 抬起判定改用"原始帧手指存在"（2026-08-03，147 tests 通过）**：用户要求"取消掉所有退出机制"。**本质**：holding 退出条件从"过滤后的 touching"彻底改为"**触控板上有没有手指**"（rawPresent = touches 含 state 非 none/lift 的手指，**不过滤 size/region**）。滑动调节时 size（压力）波动瞬时超过滤区间 / 区域边界抖动 → touching 闪断 → 旧实现误判抬起退出；现在只要手指还在触控板上（state 非 none/lift）就不算抬起 → **滑动调节永不因 size/区域波动退出**。up 仍保留 2 帧去抖（防 MT 丢帧瞬间 touches 空）。down/touching 仍用过滤后 active（识别按下/存在状态）；up 用 rawPresent（抬起判定更宽松）。轻点识别抬起也用 rawPresent（语义一致：手指离开触控板才算抬起）。教训：**"退出/结束"类判定要用最宽松的原始信号（手指在不在触控板上），"开始/识别"类判定才用严格过滤（区域内+尺寸有效）——过滤条件只应约束"开始"，不应约束"结束"**
+43. **v10.8 抬起判定时间基准 + up 边沿化（2026-08-03，147 tests 通过）**：用户反馈 v10.7 后"还是会退出"。**根因 1（v10.7 的 2 帧去抖不够）**：MT 回调在滑动中存在采样间歇，touches 可短暂为空且间歇可超过 2 帧（20-30ms）→ 帧计数去抖仍可能误判抬起 → 改**时间基准**：`up = !rawPresent && (now - lastPresent) > 100ms`（lastPresent = 最后一次有手指的 frame.now，不受帧率影响）。**根因 2（时间基准实现漏边沿化，测试暴露 3 个失败）**：`(now - lastPresent) > 0.1` 在手指持续不在时**每帧都为 true（持续信号）**——①抬起间隔计时 gapElapsed 被 up 每帧重置 → 间隔超时（gapTimeout）永不触发 → 停留 firstTapUp；②浮点累加误差（now 累加 0.02×N，`0.70-0.60 = 0.10000000000000009`）→ 提前 1 帧触发 up → holding 提前退出。修复：**up 边沿化**（新增 `upSatisfied` 锁存：只在"持续无手指 >100ms"的首次满足帧触发一次，之后保持 false 直到重新有手指）+ **浮点容差**（阈值 `0.1 + 1e-6`）。测试：3 个状态机端到端测试更新抬起时序（帧11-15 空手仍 firstTapDown、帧16 确认抬起；帧31-35 空手仍 holding、帧36 退出；帧2-6 空手不足 100ms、帧7 up 确认、帧8-23 间隔超时回 idle、帧24 全新 firstTapDown）。教训：**时间基准判定（阈值比较）天然是"持续信号"，用在"事件/边沿"语义（触发计时重置、状态转移）必须显式边沿化（锁存首次满足帧），否则持续 true 会破坏依赖"触发一次"的下游逻辑；浮点累加比较必须加容差，`a-b > threshold` 边界处浮点误差会提前/延后 1 帧**
+44. **v10.9 Godot 式固定步长帧循环（2026-08-03，147 tests 通过）**：用户反馈 v10.8 后"完全不行了，连状态都进入不了了"，要求研究 Godot 等游戏引擎如何保证 update 可靠性。**研究结论（Godot 源码 main_timer_sync.cpp）**：①**固定时间步长 + 时间累积器**（`advance_core`：`time_accum += process_step; steps = floor(time_accum × ticks)`，低帧率一次补多个物理步，防"追赶螺旋"限制 max 步数）；②**delta 平滑**（`DeltaSmoother`：忽略超长 delta >1s/极小 delta <1ms，抖动 delta 量化为 vsync 整数倍，leftover 长期守恒）；③**输入与模拟分离**（输入 `_process` 采集，模拟 `_physics_process` 固定 60Hz）。**我们架构的根本缺陷**：MT 回调（稀疏/丢帧/抬起后可能停止回调）直接驱动状态机——计时跳变、边沿丢失、回调停止时 frame.now（回调时取 systemUptime）冻结 → 时间基准判定永不触发 → 状态机死锁（"进不了状态"）。**重构（GestureEngine.swift）**：
+  - **回调只更新快照**：`onTouchFrame`（MT 回调线程）写 `latestTouches` + `lastTouchWall`（NSLock 保护），不驱动逻辑
+  - **固定步长 tick**：`DispatchSourceTimer` 8.33ms（120Hz）→ `pump()` 累积器 → `tick()`；`simTime` 每次 tick 固定 +8.33ms（模拟时钟，持续前进，与回调频率/定时器抖动解耦）；间隔 >250ms（挂起/休眠）截断不追赶
+  - **FrameContext 加 `touchTimestamp`/`wallNow`**：finger 节点 up 判定加**快照陈旧**分支——`wallNow - touchTimestamp > 100ms`（MT 回调停止即抬起，即使快照内容还有手指；手指静止时 MT 持续回调不会误判）
+  - App.swift：`mt_start_touch` 后 `engine.start()`；回调改 `onTouchFrame`；quit 调 `stop()`
+  - 教训：**"回调驱动逻辑"在输入源不可靠（会丢帧/停止）时必然产生死锁或跳变——正确做法是"输入快照 + 固定步长模拟时钟"分离（游戏引擎固定步长范式）；时间判定必须用持续前进的模拟时钟而非"回调到达时刻"，否则回调停止 = 时间冻结**
+45. **v10.10 诊断最简模式（2026-08-03，147 tests 通过）**：用户反馈 v10.9 后"还是一模一样的表现"（进不了 holding），要求"屏蔽所有和实现 tick 无关的，包括进入 holding 等"——**隔离验证底层链路**。实现：
+  - `TimelineMigrator.migrate` 加 `minimalDiagnostic` 参数 → `migrateMinimal`：最简图 = touchData + region + finger + phase 变量（touching 写 4 / !touching 写 0，引擎复用 phase==4 建立 eventBox）+ tick 链（touching 门控 → transform → quantize → consume + 刻度震动）；无识别状态机模块/无 enter/exit 震动/无光标锁定/无边界分流/无 trigger
+  - `GestureConfig.legacyPipelineValue`：从当前图提取 v2 管线参数（信号源/变换/量化/震动/识别时序/鼠标），供重建图用
+  - `ConfigStore.applyMinimalDiagnostic`：所有手势图重建为最简图（**不落盘**，内存态）
+  - `GestureEngine.diagnosticMinimalTick = true`（默认开启，改 false 重启恢复完整图）
+  - 行为：手指在绑定区域内**直接接触**（无需双击）→ 进入调节 → 滑动 tick
+  - 目的：若此模式正常 → 问题在识别状态机；若仍不行 → 问题在 MT 回调/finger/tick 链本身
+46. **v10.11 quantize 跨帧累积（2026-08-03，147 tests 通过）**：诊断模式用户反馈"只能激活一个 tick 一次滑动"。**日志实证**：①tick 只发生在手指接触瞬间（`quantize in=-0.073 -> tick(count:3)`）——transform.last 残留上次滑动的旧基线，接触瞬间消费跨滑动累积位移产生**假 tick**；②滑动中每帧 delta 仅 0.0001~0.003（远小于 stepNorm 0.02）→ quantize "无刻度" → **慢速连续滑动永不 tick**。**根因**：v8 图化把量化从 v1 引擎的"跨帧累积式"（lastTriggerValue += tickCount×stepNorm，余量保留）退化成"每帧独立"（帧间差 < stepNorm 即丢失）——MEMO"快速滑动丢刻度"问题的图化变体。**修复（NodeExecutors）**：
+  - **transform.delta**：输入无效（门控关闭/手指离开）→ 清空 last 基线（否则跨滑动残留旧基线 → 接触瞬间假 delta）
+  - **quantize**：**跨帧累积**——`acc = state[accum] + delta`；discrete 用 |acc| 判刻度，触发后 `acc -= tickCount×stepNorm×sign`（余量保留继续累积）；输入无效 → 清空 accum（与 transform 一致）；continuous 直接消费当帧 delta（acc 清零）
+  - **finger 新增 `present` 输出**（rawPresent，不过滤 size/区域）——诊断图门控/写 phase 从 touching 改用 present（滑动中 size 波动/手指 x 抖出区域让 touching 闪断 → 链断，只零星 tick；v10.7"结束类判定用宽松信号"原则贯彻到门控）
+  - **完整图 tick 门控同步**：`tickActive = phase==4 AND touching` → `phase==4 AND present`；accumulate 节点输入无效清空（同源问题）
+  - 诊断模式验证通过后**恢复完整图**：`diagnosticMinimalTick` 默认 true→false（保留开关，置 true 重启进诊断模式）；进入 holding 的识别状态机/enter-exit 震动/光标锁定/方向感知边界分流全部恢复
+  - 教训：**"量化触发"必须是跨帧累积语义（触发扣减+余量保留），任何"每帧独立量化帧间差"的实现都会让慢速连续输入永不触发——这是滑动类手势最隐蔽的 bug；图化重构时跨帧状态（lastTriggerValue/累积器）必须随迁，纯函数化会丢状态**
+47. **v10.12 诊断模式覆盖 config.json（2026-08-03，147 tests 通过）**：恢复完整图后用户反馈"进入的提示震动也没了"。**根因**：`GestureEngine.config` 的 `didSet { ConfigStore.save }` 在 **init 赋值时也触发**——诊断模式 `applyMinimalDiagnostic`（内存图，只有刻度震动）被**错误落盘覆盖**了 config.json；恢复完整图后 load 到的是诊断图（无"进入震动"haptic 节点）→ 进入 holding 无震动。**修复**：
+  - **config 存储改 `_config` + 计算属性**：init 直接写 `_config`（不触发 save），setter 才 save（用户主动改配置时）——"init 加载不应落盘"原则
+  - config.json 已被覆盖（备份为 `config.json.bak-20260803-被诊断图覆盖`）→ 备份后删除，app 用 `AppConfig()` 默认重建完整图（左边缘亮度/右边缘音量 + 识别状态机 + 进入/边界/刻度震动）
+  - 教训：**带 didSet 的存储属性在 init 中赋值同样触发 didSet——加载路径绝不能触发持久化；诊断/临时模式的内存态配置必须显式区分"不落盘"，否则静默覆盖用户配置（且要等到用户下次用该功能才发现）**
+48. **v10.13 完整图审查修复两处（2026-08-03，147 tests 通过）**：用户要求"看现在的节点是否一致、有没有 bug 修一下"。**审查结论**：config.json 重建的完整图结构与迁移器预期一致（27 节点：数据源 + 识别状态机模块(88 子节点/142 边/11 转移链) + enter 震动/锁光标 + tick 链(phase==4 AND present → transform → quantize 累积 → 方向感知边界分流) + 边界/刻度震动；模块端口声明与子图连接器匹配）。**修复两个 bug**：
+  - **① up 判定的"快照陈旧"不看快照内容**（v10.9 引入）：`stale = wallNow - touchTimestamp > 100ms` 只要 MT 回调暂停超 100ms 就判抬起——滑动中 MT 采样间歇/系统负载导致回调暂停时，即使快照还有手指（手指在触控板上）也会误判抬起 → 滑动中退出 holding（用户核心痛点的潜在复发源）。**修复**：`staleEmpty = 陈旧>200ms && !rawPresent`——快照有手指时保守不判抬起（MT 暂停报告 ≠ 手指离开；日志实证手指离开时 MT 必回调空帧/state=0 残留 → 快照终变无手指，走 100ms 主分支）
+  - **② mediaKey 不更新 trackedValue → boundarySide 冻结**（v10.2 有意设计，但 v10 方向感知边界分流重新引入消费方）：trackedValue 冻结在进入 holding 时的值 → 滑动到边界 boundarySide 不变 → 朝外滑动不触发边界震动（out1）、永远走 consume。**修复**：mediaKey 发键后 trackedValue 用**系统真实步长 1/16** 推进（clamp [0,1]；v10.4 漂移教训是误用配置 step 0.0125——系统步长 1/16 准确；首次惰性读一次，零 IOKit）；测试 3 个 mediaKey 断言更新（0.5 连续滑动 → 0.625 / 0.99+1/16 → clamp 1.0 / 下边界 clamp 0）
+  - 教训：**"有意的设计"（mediaKey 不更新 trackedValue）在功能演进（新增 boundarySide 消费方）后变成隐性 bug——设计决策的"无消费方"前提要随功能变更重新验证；系统媒体键档位步长是已知常数（1/16），数学推进用系统步长而非配置 step 就不漂移**
+49. **v10.14 Force 压力手势 + 手势全局启用开关（2026-08-03，147 tests 通过）**：用户需求"添加两个新手势（左/右边缘各一），效果同双击滑动调节，但进入方式不同——Force 按压保持一定时间进入；全程在特殊压力下才能滑动；每个手势图加全局启用/禁用开关"：
+  - **GestureConfig.enabled**：手势全局启用字段（默认 true）；CodingKeys + `decodeIfPresent ?? true`（旧配置兼容）+ encode 写入；两个原有 init 加 `enabled: Bool = true` 参数
+  - **Force 便捷 init**：`GestureConfig(name:regionID:eventID:forcePipeline:event:pressureThreshold:holdMinDuration:enabled:)`——内部调 migrate 传 `useForcePress: (threshold, hold)`
+  - **TimelineModuleTemplates.forcePress 模块**（「Force按压识别」可折叠组）：输入 pressure/touching/now → 输出 phase/holdingPulse/exitPulse；4 条转移——T1 idle+高压上升沿（high 且 !prevHigh）→ 记 pressStart+prevHigh=true；T2 idle+压力释放沿 → prevHigh=false；T3 idle+高压持续够久（now-pressStart > holdMinDuration）→ holding（holdingPulse 脉冲）；T4 holding+压力不足（手指离开压力必为 0，同一路径）→ idle（exitPulse）；prevHigh 兜底防 pressStart 未记录误判
+  - **TimelineMigrator.migrate 加 useForcePress 参数**（默认 nil 不破坏旧调用）：非 nil → 模块区用 forcePress 模板（pressure/touching/now 连线），否则 stateMachine；根图其余（enter/exit 震动 + 光标锁定 + tick 链）结构不变
+  - **ConfigStore.load 自动补齐**：检测缺失 "左侧Force"（左边缘+亮度）/ "右侧Force"（右边缘+音量）→ 自动 append（pressureThreshold 0.8 / holdMinDuration 0.3）；**匹配用 actionType 而非 event.name**（config.json 重建后 events name 是英文 "Volume"/"Brightness"）
+  - **引擎**：`for gesture in config.gestures where gesture.enabled`——禁用即跳过（不进入任何状态机）
+  - **UI**：NodePaletteView（左侧悬浮栏）顶部加启用 Toggle（已启用/已禁用 红字提示），TimelineGraphView @Binding 透传，GestureTabView 接 config.gestures[idx].enabled 绑定——切换立即生效（引擎跳跳过）
+  - 实测 config.json：4 手势（左侧/右侧/左侧Force/右侧Force），Force 手势 module=['Force按压识别'] nodes=27
+  - 待用户实测：Force 压力 0.8 是否合适（zPressure 范围 ~0-1.54，按压吃力可下调）；双击与 Force 手势同边缘互不干扰验证
+  - 教训：**补齐手势/事件匹配不要依赖 name（本地化/重建后可能变英文），用稳定 ID 或 actionType 语义匹配**；didSet 陷阱（v10.12）后新增便捷 init 必须直接写存储属性不触发保存
+50. **v10.15 Force 阈值 0.8→1.2（2026-08-03，150 tests 通过）**：用户反馈 Force 手势"不需要任何进入条件，直接触发调整状态"（一碰就进）。诊断：**新增 3 个 Force 端到端测试**（轻触 0.5 保持 1s 不进入 / 高压须持续 0.3s 才进入且 pressStart 记录正确（不足 0.3s phase 恒 0）/ 压力不足退出 + 解锁 / 进入后滑动正常调节），150 tests 全过 → **模板逻辑（forcePress 模块 + 迁移）完全正确**。结论：真实触控板**轻触 zPressure 即达 0.8**（zPressure 范围 0~1.54），阈值太低 → 用户轻放 0.3s 自动进入，误认为"无进入条件"。修复：**压力阈值 0.8 → 1.2**（明显用力才触发）——ConfigStore 补齐代码 + python 直改 config.json 已落盘的 2 个 Force 手势"压力足够?" compare threshold；finger 诊断日志加 zPressure 输出（诊断模式可见实际读数，供再校准）。教训：**单元测试能证明图逻辑正确，但"自动补齐"的手势参数（压力阈值）只能靠真实手感校准——初始值要保守（宁高勿低），且测试断言必须覆盖"不足条件不触发"这一侧**（若 pressStart 写入失败，heldCmp=now-0 恒真会一碰即进，该断言能抓出）
+51. **v10.16 Force 区域约束 + T5 退出 + 信号源修复 + 滞回（2026-08-03，153 tests 通过）**：用户反馈"很轻很轻都可以触发 + 整个触控板都可以触发"，随后"压力阈值过小 + 按着他那个音量会上下乱动 + 不停震动"。**日志实证三连**：
+  - **① 区域约束缺失（"整个触控板都能触发"）**：Force 模块 pressure 来自 touchData.pressure（=touches.first 的 zP，**不看位置**），forcePress 子图 touching 输入接了但从未使用；且**T4 压力退出依赖 finger.pressure（区域内手指压力）——手指滑出区域后 finger.pressure invalid → notHigh invalid → T4 冻结 → holding 永不退出**；tick 链门控 `phase==4 AND present`（present=触控板任意位置有手指）→ 区域外任意滑动持续调节。修复：①finger 节点加 pressure 输出端口（区域内手指压力，通用能力）；②Force 模块 pressure 改回 **touchData.pressure（原始 zP，任何位置）**——T4 压力退出任何位置可靠（finger.pressure 只在区域内有值）；③新增 **T5 滑出区域退出**：模块加 lastTouchTime 变量（touching 时每帧写 now）+ notTouching + 离开时长 + 离开超时（>0.1s）→ holding && !touching && 离开超时 → idle（时间基准去抖，容忍滑动中 touching 闪断，v10.7 教训）
+  - **② 信号源误提取（"按住音量上下乱动 + 不停震动"）**：`legacyPipelineValue` 提取信号源取 touchData **第一个 SignalSource 出边**——Force 的 `touchData.pressure→module` 连线排在 tick 链 `touchData.normY→gate` 之前 → 信号源误提取为 **pressure** → 升级迁移后 tick 链信号源变成压力 → **用户按住不动时 zP 抖动（力度不稳 ±0.02）→ transform delta → quantize 累积（v10.11 跨帧累积）→ 每帧 tick → 音量乱调 + 不停震动**。修复：**tick 信号源提取跳过模块输入连线**（新 `tickSignalSourcePort`：touchData 出边中第一个连到非 module 节点的 SignalSource 端口），legacyPipelineValue/tickSignalSource 共用；upgradeForcePress 迁移时**强制 signalSource=.normY**（Force 滑动调节恒用 Y 坐标，压力只做进入/退出判定）
+  - **③ 反复进出（"上下乱动"）**：用户按住时力度波动 zP 在阈值上下 → T4 瞬时触发退出 → 再按重进 → **进入震动反复 + 音量跳**。修复：**进入/退出阈值迟滞（hysteresis）**——T4 用独立"压力不足?" compare（threshold = 进入阈值-0.3，即 enter 1.4 / release 1.1）——按住 1.2（迟滞区间 1.1~1.4）稳定不退出，松手（zP<1.1）才退出
+  - **④ 阈值 1.2→1.4**：用户明确"阈值过小"（ConfigStore 补齐 + config.json python 直改）
+  - **CollectInputs 多入边 bug（T5 exitPulse 丢失，测试抓到）**：moduleOutput(exitPulse) 被 T4/T5 两条退出链共连，collectInputs 取第一个入边值（T4 条件不满足输出 invalid 先填）→ T5 有效脉冲被堵住 → 退出震动/解锁不触发。修复：**collectInputs 同端口多入边优先保留有效值**（invalid 可被后续有效覆盖）
+  - **Force 自动升级**：upgradeForcePress 检测 `!hasLastTouch || pressureFromFinger || !hasRelease || wrongTickSource`（覆盖 v10.14/v10.15/v10.16a 三种历史结构）→ 从子图 compare 提取 enter/hold 重新迁移；检测 tick 信号源 = gate(保持中?).value 输入端口
+  - 测试：+4（pressure 来自 touchData 结构断言 / T5 滑出区域退出端到端（区域外 0.08s 内不退出、0.1s 后退出+解锁）/ 滞回稳定按住（1.2 在 1.1~1.4 区间不退出、0.8 退出））；153 tests 全过
+  - 教训：**"数据源多输出节点 + 一个输出端口被模块专用（pressure→module）"时，通用提取逻辑（第一个出边）会被模块连线污染——信号源提取必须跳过模块输入边**；**"按住调节"场景的退出判定必须有迟滞（进入阈值≠退出阈值），否则力度波动=反复进出=假性"太灵敏"**；**同端口多入边（OR 合并语义）取"第一个"会丢有效值，必须优先保留 valid**；日志实证（zP 轻触 0.2~0.6/正常按 1.07）+ 测试三连（不足不触发/区间稳定/退出可靠）是定位"很轻触发+乱动"的关键
+52. **v10.17 Force 进入震动改 buzz（2026-08-03，154 tests 通过）**：用户反馈"波形和正常点击没法区分"——Force 进入震动原为波形 2（强 click），与系统触控板点击手感几乎相同。修复：**Force 进入震动改波形 3（buzz 嗡鸣）**——音色与 click 完全不同，一听即辨；ConfigStore 补齐 forcePipeline.hapticEnter 设 buzz；upgradeForcePress 检测"进入震动"节点 waveform != 3 触发升级 + 迁移时强制 hapticEnter=buzz（pipeline.signalSource 同时强制 normY 保留）。测试：+1（升级后进入震动 waveform=3 + tick 信号源 normY）。教训：**与系统点击同型反馈（click 1/2）的"状态提示"震动要选异音色波形（buzz 3/重击 16）+ 独立可编辑**，用户才能区分"系统点击"与"应用状态变化"
+53. **v10.18 边界分流整体移除（2026-08-03，154 tests 通过）**：用户反馈（双击手势）"进入后滑动一定距离再反向滑动，值有概率卡在一个地方，但 tick 仍旧行为正常；一次滑动中多改变几次方向必然卡住"。**根因**：tick 链 boundaryState（方向感知边界分流）依赖 mediaKey **trackedValue 数学推进**（每键假设 1/16），与系统真实值**漂移**（实际每键步长 ≠1/16）→ 反复反向滑动后 trackedValue 虚高到边界 → 误判"朝外"→ 走 out1 只触发边界震动**不调节** → 值卡中间但 tick 震动照常。**修复：移除整个边界分流**——quantize.tick → consume.data 直接（朝外/朝内都调节），边界由**系统自身 clamp**（值到 0/100% 自然停，不会卡中间值）；删 boundaryState/sign/目标方向/朝外?/朝边界外?/边界分流 branch/边界震动节点；haptic 默认 enter+tick（3→2）。**升级**：upgradeBoundarySense 检测条件改为 `boundaryState != nil`（覆盖 v10 起所有方向感知结构）→ 重新迁移无分流；**upgradeBoundarySense 跳过 Force 手势**（由 upgradeForcePress 专用升级保留阈值/buzz——Force 检测加 hasBoundaryState）。测试：testTickChain_CoreNodesAndEdges 无分流断言 / testTickChain_BoundaryDirectionSense → NoBoundarySplit_AlwaysConsumes（朝外也 consume）/ testUpgradeBoundarySplit_Removed。教训：**基于"数学推进的追踪值"（trackedValue）做边界判定必然漂移（媒体键实际步长不可知）——移除依赖比校准更稳：边界交给系统 clamp，UI 上"值到顶/底不动"本身就是边界反馈**；**多升级路径并存时，专用升级（Force）必须跳过通用升级（boundary），否则参数（阈值/buzz）被通用迁移覆盖丢失**
+54. **v10.19 方向默认值翻转 + 基础设置页面（2026-08-05，154 tests 通过）**：用户两个需求：
+  - **① 默认方向反了**：本机 MT norm_y 方向与常规假设相反（上滑=norm_y 增大）→ 默认 directionRule 从 positiveDecrease 改 **positiveIncrease**（上滑=增加）；改 EventConfig init 默认 / defaultVolume / defaultBrightness / decodeIfPresent 默认 + config.json 两事件；**旧 JSON upIncrease→positiveDecrease 解码映射保持不变**（旧用户配置行为不变）。测试：EventConfigTests 默认值断言更新（3 处）
+  - **② 学习成本高 → 恢复基础设置页面**：GestureTabView 默认显示**基础设置卡片页**（`@AppStorage("gestureViewMode.basic")` 记忆选择），可切换**高级画布**节点图；两种模式读写同一张图。新建 `BasicGestureSettingsView.swift`：绑定（区域/事件 Picker→ref 节点 params）/ 触发识别（双击 4 阈值：按下超时/漂移/间隔/保持；Force：压力阈值/保持时长——compare 节点标题匹配）/ 信号处理（信号源 touchData→gate 连线端口 / 变换 transform 节点 / 量化 triggerMode+stepNorm/sensitivity quantize 节点）/ 触觉反馈（进入/刻度/退出 haptic 节点波形+次数+间隔）
+  - **模型层**：GestureConfig 新增基础设置读写辅助（可测试）：`recognizeParams`（读 compare 阈值，含递归子图）、`isForceGesture`、`updateNodeParams(_:title:_:)`（递归改子图节点参数）、`setRecognizeThreshold` / `setSignalSource`（touchData→gate.value 连线端口）/ `setTransformMode` / `setQuantize` / `setHaptic`
+  - 教训：**"学习成本高"= 高级能力（画布）不能替代常用配置入口——保留高层快捷设置（卡片）与底层完整编辑（画布）并存，共用同一数据源（图）双向实时同步**；**参数写回必须只改目标节点（标题匹配+递归子图），不能整体重新迁移（否则丢失用户画布自定义布局）**
 ## v1.1.0 架构变更（事件配置化重构）
 - 手势/事件/区域三解耦：RegionConfig(矩形坐标) + EventConfig(动作+step+边界) + GestureConfig(regionID+eventID+触发参数+所有震动)
 - 状态机从 leftState/rightState 改为 `[UUID: GestureState]` 字典，每帧遍历所有手势

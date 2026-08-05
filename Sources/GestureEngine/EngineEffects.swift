@@ -36,8 +36,4 @@ final class EngineEffects: TimelineEffects {
     func notify(label: String) {
         // 预留：UI 通知（M6 调试工具使用）
     }
-
-    func recognizerState(holding: Bool) {
-        engine?.recognizerState(holding: holding)
-    }
 }

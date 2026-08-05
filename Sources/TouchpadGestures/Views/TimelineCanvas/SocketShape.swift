@@ -28,45 +28,83 @@ extension SocketType {
         case .bool:    return L10n.tr("布尔", "Boolean")
         case .output:  return L10n.tr("量化输出", "Gesture Output")
         case .unit:    return L10n.tr("事件脉冲", "Event Pulse")
-        case .generic: return L10n.tr("泛型", "Generic")
+        case .generic: return L10n.tr("泛型（任意类型，可连任何形状）", "Generic (any type)")
         case .fingers: return L10n.tr("手指帧", "Fingers")
         case .region:  return L10n.tr("区域", "Region")
         }
     }
+
+    /// 端口行内联短名（窄卡片空间有限，用短名标注类型，一眼看出形状代表什么类型）
+    var shortName: String {
+        switch self {
+        case .float:   return "float"
+        case .int:     return "int"
+        case .bool:    return "bool"
+        case .output:  return "out"
+        case .unit:    return "pulse"
+        case .generic: return "any"
+        case .fingers: return "fingers"
+        case .region:  return "region"
+        }
+    }
 }
 
-/// 单个 socket 的视觉形状（8pt 圆点区）
+/// 单个 socket 的视觉形状（10pt 区）——形状 = 类型，同形状才能连
+/// float=实心圆● / int=方块■ / bool=菱形◆ / output=三角▲ / unit=空心圆○ / region=圆角矩形▭ / fingers=三圆点
+/// generic=**空心六边形线框**，内部叠加当前透传的实际类型小形状（branch 输入 float → out1/out2 显示「六边形+圆●」）
 struct SocketShapeView: View {
     let type: SocketType
+    /// generic 端口当前可确定的透传类型（nil = 未知，仅显示空心六边形）
+    var passthrough: SocketType? = nil
+
     var body: some View {
         ZStack {
-            switch type {
-            case .float:
-                Circle().fill(type.socketColor)
-            case .int:
-                RoundedRectangle(cornerRadius: 2, style: .continuous).fill(type.socketColor)
-            case .bool:
-                DiamondShape().fill(type.socketColor)
-            case .output:
-                TriangleShape().fill(type.socketColor)
-            case .unit:
-                Circle().strokeBorder(type.socketColor, lineWidth: 1.2)
-            case .generic:
-                HexagonShape().fill(type.socketColor)
-            case .fingers:
-                // 多指：三个小圆点
-                HStack(spacing: 1.5) {
-                    Circle().fill(type.socketColor).frame(width: 3, height: 3)
-                    Circle().fill(type.socketColor).frame(width: 3, height: 3)
-                    Circle().fill(type.socketColor).frame(width: 3, height: 3)
+            if type == .generic {
+                // 透传：空心六边形线框（六角星填充改线框——用户要求"透传是空心的形状"）
+                HexagonShape()
+                    .stroke(type.socketColor, lineWidth: 1.0)
+                if let pt = passthrough {
+                    // 内部叠加当前实际透传类型的形状（0.6 缩放 ≈ 6pt，略小于六边形内切圆）
+                    socketGlyph(pt)
+                        .scaleEffect(0.6)
                 }
-            case .region:
-                // 区域：小矩形
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous).fill(type.socketColor)
+            } else {
+                socketGlyph(type)
             }
         }
-        .frame(width: 9, height: 9)
+        .frame(width: 10, height: 10)
         .help(type.displayName)
+    }
+
+    /// 具体类型形状（无 frame，由调用方决定尺寸）
+    @ViewBuilder
+    private func socketGlyph(_ t: SocketType) -> some View {
+        switch t {
+        case .float:
+            Circle().fill(t.socketColor)
+        case .int:
+            // 方块（无圆角）——区别于 region 圆角矩形
+            Rectangle().fill(t.socketColor)
+        case .bool:
+            DiamondShape().fill(t.socketColor)
+        case .output:
+            TriangleShape().fill(t.socketColor)
+        case .unit:
+            Circle().strokeBorder(t.socketColor, lineWidth: 1.4)
+        case .generic:
+            // 内嵌时理论上不会出现 generic（调用方已解析），兜底空心六边形
+            HexagonShape().stroke(type.socketColor, lineWidth: 1.0)
+        case .fingers:
+            // 多指：三个小圆点
+            HStack(spacing: 1.5) {
+                Circle().fill(t.socketColor).frame(width: 3, height: 3)
+                Circle().fill(t.socketColor).frame(width: 3, height: 3)
+                Circle().fill(t.socketColor).frame(width: 3, height: 3)
+            }
+        case .region:
+            // 区域：圆角矩形（区别于 int 方块）
+            RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(t.socketColor)
+        }
     }
 }
 
