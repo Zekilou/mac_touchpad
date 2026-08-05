@@ -33,6 +33,13 @@ public enum EngineLog {
         }
     }
 
+    /// 锁内读取全部日志内容（诊断导出用；文件可能正在被追加，读到半行可接受）
+    public static var contents: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
     private static func timestamp() -> String {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss.SSS"

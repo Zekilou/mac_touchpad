@@ -1,5 +1,13 @@
 # 项目备忘录
 
+## 两会话整合（2026-08-05，170 tests 通过）
+另一会话（9776d66 启动/闪退修复 + EngineLog/引擎状态/手势健康红点 + 830791d 诊断日志开关）与我方（诊断模块/语言/形态识别/双模式脚本）已在 830791d 合并提交。审查后补 3 处整合：
+1. **elog 语义裂缝修复**：elog 的 EngineLog 写入门槛原只有 diagnosticMinimalTick → 改 `diagnosticMinimalTick || forceDebugLogging`——设置页「诊断日志」开关打开后"进入/退出 holding"也写入 /tmp/touchpad_run.log（与设置页文案一致）；顺带清理 guard 括号残留
+2. **EngineLog.contents**：新增锁内读取全部日志内容方法（导出用）
+3. **导出诊断包含 run.log**：DiagnosticsModule includeLogs 时除 engine.log（环形缓冲）外，同时导出 EngineLog 的 /tmp/touchpad_run.log 为 run.log（非空才写）——两会话日志体系统一进入诊断包
+- 待提交推送
+
+
 ## "权限全绿但触控板无反馈"诊断增强（2026-08-05，170 tests 通过）
 用户反馈：UI 正常、媒体键测试成功、权限全绿，但触控板手势无反馈。这类问题的断点（触控板数据链路/设备ID/手势被跳过）此前全部静默。落地：
 1. **EngineLog.swift（新）**：诊断日志 stderr + 落盘 /tmp/touchpad_run.log（512KB 上限，超出清空；.app 环境 stderr 用户看不到，落盘后可 tail -f）

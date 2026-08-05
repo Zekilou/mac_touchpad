@@ -86,7 +86,8 @@ public final class GestureEngine {
         #if DEBUG
         DiagnosticsLog.log(msg)   // 可插拔诊断：环形缓冲（导出诊断包用）
         #endif
-        guard (Self.diagnosticMinimalTick) else { return }
+        // 引擎级 /tmp 日志：诊断最简模式或设置页「诊断日志」开关（forceDebugLogging）开启时写入
+        guard Self.diagnosticMinimalTick || Self.forceDebugLogging else { return }
         EngineLog.append("[ENGINE] \(msg)")
     }
 

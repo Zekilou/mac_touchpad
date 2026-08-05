@@ -79,7 +79,7 @@ enum DiagnosticsModule {
             } catch { fputs("[Diagnostics] 写 config.json 失败: \(error)\n", stderr) }
         }
 
-        // 3. 引擎日志（环形缓冲）
+        // 3. 引擎日志（环形缓冲 + /tmp 落盘日志——两会话日志体系统一导出）
         if includeLogs {
             let logs = DiagnosticsLog.contents.joined(separator: "\n") + "\n"
             do {
@@ -87,6 +87,16 @@ enum DiagnosticsModule {
                                atomically: true, encoding: .utf8)
                 written.append("engine.log")
             } catch { fputs("[Diagnostics] 写 engine.log 失败: \(error)\n", stderr) }
+
+            // EngineLog 的 /tmp/touchpad_run.log（开启设置页「诊断日志」后有完整数据流）
+            let runLog = EngineLog.contents
+            if !runLog.isEmpty {
+                do {
+                    try runLog.write(to: dir.appendingPathComponent("run.log"),
+                                     atomically: true, encoding: .utf8)
+                    written.append("run.log")
+                } catch { fputs("[Diagnostics] 写 run.log 失败: \(error)\n", stderr) }
+            }
         }
 
         // 4. 崩溃日志
