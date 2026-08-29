@@ -14,12 +14,12 @@ OUTPUT_DIR="${2:-$PROJECT_DIR/dist}"
 if [ "$MODE" = "dev" ]; then
     echo "==> [开发版] swift build (debug，含诊断模块)"
     swift build
-    VERSION="2.0.0-dev"
+    VERSION="2.0.1-dev"
     BUILD_NUM="$(date +%Y%m%d)"      # 日期构建号，区分不同 dev 包
 else
     echo "==> [正式版] swift build -c release（不含诊断模块）"
     swift build -c release
-    VERSION="2.0.0"
+    VERSION="2.0.1"
     BUILD_NUM="1"
 fi
 
