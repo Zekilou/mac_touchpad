@@ -30,9 +30,9 @@ struct TimelineGraphView: View {
     /// 导航切换令牌（+1 → 画布重置视图）
     @State private var resetToken = 0
 
-    /// 当前正在编辑的图（按 modulePath 解析，失败回退根图）
+    /// 当前正在编辑的图（按 modulePath 解析；解析失败——路径上 module 无子图——回退根图）
     private var currentTimeline: TimelineConfig {
-        timelineAt(timeline, path: modulePath) ?? timeline
+        timeline.subgraph(at: modulePath) ?? timeline
     }
 
     var body: some View {
@@ -93,13 +93,16 @@ struct TimelineGraphView: View {
         Binding(
             get: { currentTimeline },
             set: { newValue in
-                timeline = updatingTimeline(timeline, path: modulePath, with: newValue)
+                timeline = timeline.updatingSubgraph(at: modulePath, to: newValue)
             }
         )
     }
 
-    /// 进入模块内部子图
+    /// 进入模块内部子图（防御：模块缺失 / 非 module / 无子图时拒绝进入，避免根图自引用）
     private func openModule(_ id: UUID) {
+        guard let node = currentTimeline.nodes.first(where: { $0.id == id }),
+              node.type == .module,
+              node.subgraph != nil else { return }
         modulePath.append(id)
         resetToken += 1
         selectedNodeIDs = []
@@ -116,29 +119,6 @@ struct TimelineGraphView: View {
         modulePath.removeSubrange((index + 1)..<modulePath.count)
         resetToken += 1
         selectedNodeIDs = []
-    }
-
-    /// 按路径解析图（空路径 = 根）
-    private func timelineAt(_ root: TimelineConfig, path: [UUID]) -> TimelineConfig? {
-        guard let first = path.first else { return root }
-        guard let node = root.nodes.first(where: { $0.id == first }), let sub = node.subgraph else { return nil }
-        if path.count == 1 { return sub }
-        return timelineAt(sub, path: Array(path.dropFirst()))
-    }
-
-    /// 把 newValue 写回根图中 path 指向的 subgraph
-    /// 关键：path 为空（编辑根图本身）时直接返回 newValue——否则根图的所有写入（拖动/参数/增删）都被丢弃，
-    /// binding 值弹回旧值，视觉上"完全拖不动"（此前根图拖拽失效的最终根因）
-    private func updatingTimeline(_ root: TimelineConfig, path: [UUID], with newValue: TimelineConfig) -> TimelineConfig {
-        guard let first = path.first else { return newValue }
-        guard let idx = root.nodes.firstIndex(where: { $0.id == first }) else { return root }
-        var copy = root
-        if path.count == 1 {
-            copy.nodes[idx].subgraph = newValue
-        } else if let sub = copy.nodes[idx].subgraph {
-            copy.nodes[idx].subgraph = updatingTimeline(sub, path: Array(path.dropFirst()), with: newValue)
-        }
-        return copy
     }
 
     /// 面包屑栏（右上角）：根名称 → 各模块标题，可点击返回
@@ -240,7 +220,11 @@ struct TimelineGraphView: View {
         let col = addCount % 8
         let row = addCount / 8
         var t = currentTimeline
-        let node = NodeConfig(type: type, x: Double(col * 220), y: Double(row * 120))
+        // module 节点初始化空子图：避免双击进入后把根图写进子图 → 执行期无限递归（H2）
+        let node = NodeConfig(type: type,
+                              x: Double(col * 220),
+                              y: Double(row * 120),
+                              subgraph: type == .module ? TimelineConfig(trigger: .onTick) : nil)
         t.nodes.append(node)
         t.entryNodeIDs.append(node.id)
         canvasBinding.wrappedValue = t

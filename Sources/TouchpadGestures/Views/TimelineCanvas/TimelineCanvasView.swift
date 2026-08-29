@@ -405,19 +405,16 @@ struct TimelineCanvasView: View {
     }
 
     /// 命中检测：画布视图坐标点（y 向下，DragMonitor isFlipped+convert 保证）→ 节点 id
-    /// 命中头部+端口区；nil = 空白/编辑器控件区/端口行，放行
-    /// （头部+端口区 = 节点可拖动区域；端口行是连线把手放行给 SwiftUI 连线手势，编辑器是控件区放行）
+    /// 仅命中头部（节点拖动把手）；nil = 空白 / 端口行 / 编辑器控件区，放行
+    /// （端口行是连线把手，放行给 SwiftUI 连线手势；编辑器是控件区放行；拖动仅从头部发起）
     private func hitTestNode(atView p: CGPoint) -> UUID? {
         // 画布视图坐标 → 画布坐标
         let canvas = CGPoint(x: (p.x - pan.width) / zoom,
                              y: (p.y - pan.height) / zoom)
         let w = TimelineCanvasMetrics.nodeWidth
         for node in regularNodes {
-            let portRows = max(NodeTypeDef.inputSockets(of: node).count,
-                               NodeTypeDef.outputSockets(of: node).count)
-            let hitH = TimelineCanvasMetrics.headerHeight + CGFloat(portRows) * TimelineCanvasMetrics.portRowHeight
             if canvas.x >= node.x, canvas.x <= node.x + w,
-               canvas.y >= node.y, canvas.y <= node.y + hitH {
+               canvas.y >= node.y, canvas.y <= node.y + TimelineCanvasMetrics.headerHeight {
                 return node.id
             }
         }

@@ -1,5 +1,31 @@
 # 项目备忘录
 
+## 高危修复完成（2026-08-29，180 tests 通过，debug+release 均构建成功）
+应需求"开始"按优先级修复全面审视的问题。已完成 H1/H2/H3 三项高危：
+- **H1 v2 迁移路由不可达**：ConfigStore.load 改为先按顶层 version 分流（<3 先走 v2/v1 迁移），不再先 decode v3 被宽松成功。已补回归测试。
+- **H2 module 节点无子图 → 无限递归**：TimelineConfig 新增模型层 `subgraph(at:)`/`updatingSubgraph(at:to:)`/`ensuringModuleSubgraphs()`（public）；视图层 `currentTimeline` 改用 `timeline.subgraph(at:modulePath) ?? timeline`、`canvasBinding` 用 `timeline.updatingSubgraph(at:to:)`、`openModule` 加 guard（非 module/无子图拒绝进入）、`addNode` 对 `.module` 初始化空子图、删除旧 `timelineAt`/`updatingTimeline`；ConfigStore.load 加载时对每个手势 `ensuringModuleSubgraphs()` 补全缺失子图。新增 TimelineSubgraphNavigationTests 9 个测试。
+- **H3 拖动命中区含端口行 → 无法连线**：TimelineCanvasView.hitTestNode 命中区收窄到仅头部（headerHeight），端口行/编辑器区放行给 SwiftUI 连线手势（此前含端口行，DragMonitor 消费 mouseDown 导致只能拖节点）。**需真机验证**连线/拖动手感。
+- 测试：180 tests 全过（171 原 + 9 H2 新增）；`swift build -c release` 成功（仅保留原有过时 `onChange(of:perform:)` 警告）。
+
+## 全面审视复核（2026-08-29，170 tests 通过，只读审查未改码）
+应需求"看一下项目有什么问题"重审全部核心源码。**核实结论：MEMO「全面审视」记录的问题（H1/H2/H3、M4~M11）当前全部仍在**，无已修复项。关键确认：
+- H1 v2 迁移路由不可达：ConfigStore.load L61 先 decode AppConfig 不查 version；v2 文件必被宽松 decode 成功 → GestureConfig 缺 timeline/timelines 键回退空图 L100 → 升级检查全跳过 → save 覆盖 v2 文件
+- H2 module 无子图：TimelineGraphView.addNode L239-249 不设 subgraph；openModule L102 无 guard；updatingTimeline L137 path.count==1 无条件写 subgraph=newValue → 根图自引用 → 执行期无限递归
+- H3 拖动命中区含端口行：TimelineCanvasView.hitTestNode L410-425 hitH 含 portRows，与"端口行放行给连线"注释矛盾
+- M4 L10n 启动不生效：AppDelegate.init L122 赋值 appSettings 不触发 didSet
+- M5 upgradeForcePress L447 waveform != 3 判定
+- M6 touchSizeMax L65-68 < 1.2 无版本门控
+- M7 direct 模式每 tick 双读 IOKit（EventConfig L290-304）
+- M9 模块端口编辑只改声明不同步连接器（ModuleEditorView.addPort/removePort）
+- M10 RegionTabView xMin/xMax/yMin/yMax 独立 Slider 可交叉成倒置；MorphologyTabView size 上下限已限定（0...0.5 / 0.5...2.0）不会交叉
+- M11 stop() L130-145 与 tick 队列无锁竞争
+
+**本次新增问题**：
+1. build_app.sh L28-29 **无条件多跑一次 `swift build -c release`**：dev 模式先 swift build(debug) 又编译 release；release 模式连编两次。dev 模式若 release 编译失败，set -e 会让打包整体中止（尽管 debug 产物已成功）。建议删掉 L28-29，或仅 release 模式保留一次
+2. 编译仅 1 条警告：NodeValue.swift L48 `extension` 声明 mt_touch_t 对 Equatable 的 conformance——建议加 `@retroactive` 消除未来冲突
+
+待修优先级仍按原建议：H1/H2/H3 → M4/M5/M6 → 其余。（截至 2026-08-29，H1/H2/H3 已修复，见顶部「高危修复完成」；下一批 M4/M5/M6 及其余待修）
+
 ## 菜单栏「设置」闪退修复（2026-08-05，170 tests 通过）
 用户报告点 menubar 菜单 Settings 闪退。排查 4 份崩溃报告（8-01/8-02/8-05），发现**两类不同崩溃**：
 1. **B 类（已修）**：8-01-233400 `_swift_reportExclusivityConflict` trap——config 并发独占冲突，9776d66 已修复
@@ -90,3 +116,36 @@
 ## 历史归档（2026-08-05）
 - 2026-08-01 前的全部开发记录已归档至 [docs/ARCHIVE.md](docs/ARCHIVE.md)：管线规划（M1~M8 交付清单）、v6~v9 节点化演进、v1.1.0 架构变更、技术路线（MultitouchSupport.framework）、UI 布局规范、运行方式与分发构建等。
 - MEMO.md 仅保留最近状态（当前架构简述 + 最近修复记录），降低认知负载。
+
+## 全面审视（2026-08-05，170 tests 通过，只读审查未改码）
+引擎/模型/UI/桥接层全部读完（含两个子代理并行审查 + 关键项亲自验证）。已确认的待修问题：
+
+### 高危（建议优先修）
+1. **v2 迁移路由不可达 → v2 配置静默降级为空图并覆盖落盘**（ConfigStore.load L61 先 decode AppConfig 不查 version；AppConfig 必填键 version/global/regions/gestures/events 与 v2 文件键集合完全重合 → 任何 v2 文件必先被宽松 decode 成功 → GestureConfig 缺 timeline/timelines 键回退空图 L100 → 升级检查全跳过 → ensureBindingsInGraph 补 ref 节点后 save 覆盖用户 v2 文件，管线配置全丢）。修复：按 version(<3) 先路由 v2 分支或探测 timeline 键；补真实 v2 JSON 走 load() 的回归测试
+2. **工具箱添加的 module 节点无子图 → 双击进入后编辑把根图写进子图 → 执行期无限递归栈溢出**（TimelineGraphView.addNode L243 不设 subgraph；openModule L102 不检查；timelineAt 解析失败静默回退根图 L34-36 但面包屑显示已进模块；updatingTimeline L137 path.count==1 无条件写 subgraph = newValue → 根图自引用；NodeExecutors.module 递归 GraphEvaluator）。修复：addNode 对 .module 初始化空子图 + openModule guard + currentTimeline 解析失败不静默回退
+3. **DragMonitor 拖动命中区含端口行，与"端口行放行给连线手势"注释矛盾**（TimelineCanvasView.hitTestNode L407-425 hitH 含 portRows；DragMonitor mouseDown 命中即消费 mouseDragged）→ 端口行无法连线，只能拖节点。修复：命中区收窄到头部或跳过端口行，需真机验证
+
+### 中危
+4. **L10n 持久化语言启动不生效**（L10n.currentLanguage 唯一赋值点 = appSettings.didSet；AppDelegate.init 赋值不触发 didSet，启动无人同步 → 存 .en 重启后菜单/设置仍中文，直到再碰一次语言选择器）。修复：init 里 AppSettings.load() 后立即同步
+5. **upgradeForcePress 用 waveform != 3 判定"旧图"**（GestureConfig L447/460）：用户关闭 Force 进入震动（haptic 节点缺失，nil != 3 为 true）或自定义波形 → 每次启动整图重建并强制回滚为 waveform 3。修复：区分"节点缺失=用户关闭"与"真旧结构"
+6. **touchSizeMax < 1.2 无版本门控**（ConfigStore L65-68）：用户合法设置 1.0~1.19 每次启动被改回 1.35 并落盘。修复：绑定迁移标记只修一次
+7. **direct 模式每 tick 双读 IOKit/CoreAudio**（EventConfig.trackedCurrentValue + 写后 currentValue，120Hz tick 队列上 getBrightness 可阻塞数 ms）→ 调节不跟手。修复：direct 也基于 trackedValue 数学推进 + 低频校准
+8. **v8/v9/v10 升级函数整图重建**（upgradeStateMachineGraph/ModularGraph/BoundarySense/ForcePress）：只保留可提取命名参数，画布自定义节点/连线/布局丢失且不可逆。修复：增量补丁或升级前备份
+9. **模块端口编辑只改声明、不同步子图连接器与边**（ModuleEditorView.addPort/rename/remove 只写 moduleInputs 声明；moduleInput/Output 连接器在工具箱/右键菜单均被隐藏 → 用户无途径补齐 → 模块接口一经编辑即静默断开）。修复：增删改时同步维护连接器或放开子图内添加
+10. **区域四坐标/形态 size 上下限可交叉成倒置**（RegionTabView/MorphologyTabView 独立 Slider）→ 预览负宽 frame + 引擎过滤空集手势全失效。修复：clamp 或联动
+11. **stop() 与 tick 队列无锁竞争**（GestureEngine.stop L130-144 主线程清 eventBoxes/runtimes/effects.eventBox；timer.cancel 不等正在执行的 tick handler）→ 低概率独占访问 trap。修复：清理派发到 tickQueue 或加锁
+
+### 低危（摘录）
+- EngineLog.append 每调用新建 DateFormatter + open/close FileHandle（L4 性能，120Hz 日志密集时拖慢 tick）
+- DirectionRule 两处回退默认互相矛盾（缺字段 .positiveIncrease vs 未知值 .positiveDecrease）
+- ensureBindingsInGraph 双源状态：图上 ref 节点存在但参数 nil 时顶层字段永不回填/清理
+- EventConfig 合成 Equatable 含非 Codable 的 trackedValue → consume 后相等性误判
+- hud/freeze/notify 空实现 + set 节点与 GraphEvaluator 第二遍重复写 state（NodeExecutors.set 直接写 state 而 evaluator 也收集写请求 → 同帧双写，语义一致无碍但冗余）
+- 死代码：PermissionStatus.color / TimelineCanvasMetrics.nodeHeight / TimelineCanvasView.node(_:) 无引用；reachableNodes 仅测试用
+- SettingsTabView 图标色板硬编码中文色名未走 L10n；动态色读 redComponent 依赖外观
+- TimelineGraphView.fitToContent 与 TimelineCanvasView 重复实现 3 份包围盒计算
+- 文件超 300 行约束：TimelineCanvasView 742 / SettingsTabView 395 / ConfigView 325 / TimelineNodeView 376（画布部分明显超限）
+- 误删警示：删除文件前必须 grep 内部符号引用（TimelineNodeInspector 教训）——本次审查同样发现 PermissionStatus.color 等若删除需先确认引用
+
+### 总体评价
+架构与防御意识强（config 锁/mutateConfig、per-gesture eventBox、Godot 固定步长、手动 Codable 兼容、迁移链、@ai 注释、L10n 双语），170 tests 全绿。主要风险集中在**迁移路由可达性未端到端测试**（H1 无测试覆盖）+ **画布/模块最近迭代的边界条件**（module 无子图、端口行命中、模块端口契约）。建议修复顺序：H1/H2/H3 → 4/5/6 → 其余。

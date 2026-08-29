@@ -574,6 +574,48 @@ public struct TimelineConfig: Codable, Identifiable, Hashable {
     }
 }
 
+// MARK: - 嵌套子图导航（H2：module 无子图 → 静默回退/写回自引用）
+
+extension TimelineConfig {
+    /// 按路径解析子图：空路径 = 根本身。
+    /// 路径上的 module 节点缺失或 subgraph 为 nil 时返回 nil（调用方不得静默回退根图，避免把父内容写进子图）。
+    public func subgraph(at path: [UUID]) -> TimelineConfig? {
+        guard let first = path.first else { return self }
+        guard let node = nodes.first(where: { $0.id == first }), let sub = node.subgraph else { return nil }
+        if path.count == 1 { return sub }
+        return sub.subgraph(at: Array(path.dropFirst()))
+    }
+
+    /// 把 newValue 写回 path 指向的 module.subgraph。
+    /// 失败返回原图：路径为空直接返回 newValue；节点缺失 / 目标非 module / 目标 module 无 subgraph 时不写入——
+    /// 绝不把父内容塞进子图造成自引用（H2 根因）。
+    public func updatingSubgraph(at path: [UUID], to newValue: TimelineConfig) -> TimelineConfig {
+        guard let first = path.first else { return newValue }
+        guard let idx = nodes.firstIndex(where: { $0.id == first }) else { return self }
+        var copy = self
+        if path.count == 1 {
+            guard copy.nodes[idx].type == .module, copy.nodes[idx].subgraph != nil else { return self }
+            copy.nodes[idx].subgraph = newValue
+        } else if let sub = copy.nodes[idx].subgraph {
+            copy.nodes[idx].subgraph = sub.updatingSubgraph(at: Array(path.dropFirst()), to: newValue)
+        } else {
+            return self
+        }
+        return copy
+    }
+
+    /// 递归保证所有 module 节点都有非空子图（缺失补空子图）。
+    /// 嵌套画布恒可进入，执行时不会因 nil 子图异常；与 addNode/openModule 的防御呼应。
+    public func ensuringModuleSubgraphs() -> TimelineConfig {
+        var copy = self
+        for i in copy.nodes.indices where copy.nodes[i].type == .module {
+            let sub = copy.nodes[i].subgraph
+            copy.nodes[i].subgraph = sub.map { $0.ensuringModuleSubgraphs() } ?? TimelineConfig(trigger: trigger)
+        }
+        return copy
+    }
+}
+
 // MARK: - Predicate（条件表达式，简化版）
 
 public enum Comparator: String, Codable, CaseIterable, Hashable {

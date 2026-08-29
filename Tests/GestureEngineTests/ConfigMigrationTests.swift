@@ -119,6 +119,58 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(original, decoded)
     }
 
+    /// 真实 v2 config.json 走 load() 应触发 v2→v3 迁移（H1：v2 文件键集合与 AppConfig 重合，
+    /// 曾因先 decode v3 被宽松成功 → gesture 空图 + version=2 写回，迁移分支不可达）
+    func testV2JSONThroughLoad_TriggersMigration() throws {
+        let left = RegionConfig.defaultLeft
+        let right = RegionConfig.defaultRight
+        let volume = EventConfig.defaultVolume
+        let brightness = EventConfig.defaultBrightness
+        func makeGesture(name: String, region: RegionConfig, event: EventConfig) throws -> GestureConfigV2 {
+            // GestureConfigV2 定义了 init(from:) 无 memberwise init；用 decode 构造（缺省参数走默认）
+            // encode 时会补齐 signalSource/stepNorm/haptic*V2 等键，字节级等价真实 v2 配置文件
+            let json = """
+            {"id":"\(UUID().uuidString)","name":"\(name)",
+             "regionID":"\(region.id.uuidString)","eventID":"\(event.id.uuidString)",
+             "tapMaxDuration":0.20,"tapMaxDrift":0.05,"tapMaxGap":0.30,"holdMinDuration":0.20,
+             "disassociateMouse":true}
+            """
+            return try JSONDecoder().decode(GestureConfigV2.self, from: Data(json.utf8))
+        }
+        let v2 = ConfigStore.AppConfigV2(
+            version: 2,
+            global: GlobalSettings(),
+            regions: [left, right],
+            gestures: [
+                try makeGesture(name: "左侧", region: left, event: brightness),
+                try makeGesture(name: "右侧", region: right, event: volume),
+            ],
+            events: [volume, brightness])
+        let data = try JSONEncoder().encode(v2)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TouchpadGesturesTests-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("config.json")
+        try data.write(to: url)
+        let savedOverride = ConfigStore.overrideConfigURL
+        ConfigStore.overrideConfigURL = url
+        defer {
+            ConfigStore.overrideConfigURL = savedOverride
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let cfg = ConfigStore.load()
+        XCTAssertEqual(cfg.version, 3, "v2 文件经 load() 应迁移到 v3，而非把 version=2 写回")
+        XCTAssertEqual(cfg.gestures.count, 2)
+        for gesture in cfg.gestures {
+            let tl = gesture.timeline
+            XCTAssertNotNil(tl.firstNode(of: .touchData), "v2 迁移应生成物理层 touchData，而非宽松 decode 的空图")
+            XCTAssertNotNil(tl.firstNode(of: .finger))
+            XCTAssertNotNil(tl.firstNode(of: .varRef))
+        }
+    }
+
     /// 旧 v3 文件（顶层有绑定、图上无 ref 节点）→ ensureBindingsInGraph 补入图并清空顶层
     func testEnsureBindingsInGraph_BackfillsLegacyTopLevel() throws {
         // 构造旧 v3 手势：顶层绑定 + 图上仅 recognizer

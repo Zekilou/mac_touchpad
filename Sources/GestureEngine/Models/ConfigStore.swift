@@ -12,8 +12,12 @@ public enum ConfigStore {
         var events: [EventConfig]
     }
 
+    /// 测试注入：重定向 configURL（避免单测读写真实用户配置）
+    static var overrideConfigURL: URL?
+
     /// 用户当前配置
     public static var configURL: URL {
+        if let override = overrideConfigURL { return override }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("TouchpadGestures", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -57,6 +61,29 @@ public enum ConfigStore {
         guard let data = try? Data(contentsOf: configURL) else {
             return AppConfig()
         }
+        // 版本探测（H1 修复）：v2 JSON 顶层 version=2 且键集合与 AppConfig 重合，若先 decode v3
+        // 必被宽松成功 → gesture 缺 timeline 键回退空图、version=2 写回、迁移分支不可达。
+        // 故优先按顶层 version 分流：<3 先走 v2/v1 迁移；无 version 键视为 v1 扁平。
+        let version: Int? = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+            .flatMap { ($0["version"] as? NSNumber)?.intValue }
+        if let version, version < 3 {
+            if let v2 = try? JSONDecoder().decode(AppConfigV2.self, from: data) {
+                let migrated = migrate(v2: v2)
+                save(migrated)
+                return migrated
+            }
+            if let v1 = try? JSONDecoder().decode(V1Config.self, from: data) {
+                let migrated = migrate(v1: v1)
+                save(migrated)
+                return migrated
+            }
+            return AppConfig()
+        }
+        if version == nil, let v1 = try? JSONDecoder().decode(V1Config.self, from: data) {
+            let migrated = migrate(v1: v1)
+            save(migrated)
+            return migrated
+        }
         // 先尝试 v3（当前格式）；旧 v3 文件顶层绑定补入图并保存（图成为唯一事实来源）
         if var cfg = try? JSONDecoder().decode(AppConfig.self, from: data) {
             var didChange = false
@@ -98,6 +125,13 @@ public enum ConfigStore {
                     didChange = true
                 }
                 gesture.ensureBindingsInGraph()
+                // H2：保证所有 module 节点有非空子图（缺失补空子图）——旧配置里 module
+                // 无子图会导致双击进入后把根图写进子图 → 执行期无限递归
+                let ensured = gesture.timeline.ensuringModuleSubgraphs()
+                if ensured != gesture.timeline {
+                    gesture.timeline = ensured
+                    didChange = true
+                }
                 // 全局触摸尺寸/手掌过滤是唯一事实来源：finger 节点参数同步 global（含递归子图）
                 let synced = syncingFingerSizes(gesture.timeline,
                                                 sizeMin: cfg.global.touchSizeMin,
