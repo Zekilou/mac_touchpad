@@ -267,18 +267,36 @@ struct PermissionStatusBar: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            permRow(
-                label: L10n.tr("输入监控", "Input Monitoring"),
-                status: permManager.inputMonitoring,
-                isOK: permManager.inputMonitoring.isOK,
-                action: { permManager.openInputMonitoringSettings() }
-            )
+            // 辅助功能：本 app 唯一必需权限（执行手势走 CGEventTap 仅需辅助功能）
             permRow(
                 label: L10n.tr("辅助功能", "Accessibility"),
                 status: permManager.accessibility,
                 isOK: permManager.accessibility.isOK,
                 action: { permManager.openAccessibilitySettings() }
             )
+            // 输入监控：可选项，不参与功能判定 —— 触控板读取走 MultitouchSupport 私有框架，
+            // 不受 TCC 输入监控门控；故以说明样式展示，避免用户误以为必须授权
+            optionalPermRow(
+                label: L10n.tr("输入监控（可选）", "Input Monitoring (Optional)"),
+                note: L10n.tr("不影响触控板，无需授权", "Not required for trackpad"),
+                status: permManager.inputMonitoring,
+                action: { permManager.openInputMonitoringSettings() }
+            )
+
+            // 权限异常自愈按钮：清旧授权并重新请求（解决「已允许但仍未授予」）
+            if !permManager.allGranted {
+                Button {
+                    permManager.autoResetAndReprompt()
+                } label: {
+                    Label(L10n.tr("重置授权", "Reset Permission"),
+                          systemImage: "arrow.counterclockwise")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(L10n.tr("清除旧授权记录并重新请求授权（解决「已允许但仍未授予」）",
+                             "Clear old authorization and re-request. Fixes \"granted but not active\"."))
+            }
 
             // 媒体键测试按钮
             if permManager.allGranted {
@@ -309,6 +327,37 @@ struct PermissionStatusBar: View {
                 Text(status.label)
                     .font(.system(size: 10))
                     .foregroundColor(colorFor(status))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 可选权限说明行：以中性色展示（不红晃），状态仅作参考，附一行说明文字。
+    @ViewBuilder
+    private func optionalPermRow(label: String, note: String, status: PermissionStatus, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                HStack(spacing: 6) {
+                    Image(systemName: status.symbolName)
+                        .foregroundColor(colorFor(status))
+                        .font(.system(size: 12))
+                    Text(label)
+                        .font(.system(size: 11))
+                    Spacer()
+                    Text(status.label)
+                        .font(.system(size: 10))
+                        .foregroundColor(colorFor(status))
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 9))
+                    Text(note)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
             }
             .contentShape(Rectangle())
         }

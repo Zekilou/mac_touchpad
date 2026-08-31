@@ -13,20 +13,20 @@ OUTPUT_DIR="${2:-$PROJECT_DIR/dist}"
 
 if [ "$MODE" = "dev" ]; then
     echo "==> [开发版] swift build (debug，含诊断模块)"
-    swift build
-    VERSION="2.0.1-dev"
+    swift build --disable-sandbox
+    VERSION="2.0.2-dev"
     BUILD_NUM="$(date +%Y%m%d)"      # 日期构建号，区分不同 dev 包
 else
     echo "==> [正式版] swift build -c release（不含诊断模块）"
-    swift build -c release
-    VERSION="2.0.1"
+    swift build --disable-sandbox -c release
+    VERSION="2.0.2"
     BUILD_NUM="1"
 fi
 
 cd "$PROJECT_DIR"
 
 echo "==> swift build -c release"
-swift build -c release
+swift build --disable-sandbox -c release
 
 if [ "$MODE" = "dev" ]; then
     BINARY="$PROJECT_DIR/.build/debug/$APP_NAME"      # dev 构建产物在 debug 目录

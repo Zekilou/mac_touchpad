@@ -279,26 +279,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         // LSUIElement 无 Dock 图标，若 statusItem 未创建则进程无任何可见 UI（用户"双击没反应"主因）
         setupStatusItem()
 
+        // ① 自动除转移 + 自愈：若被 macOS App Translocation 转移到随机只读路径，
+        //   直接取回原始路径、移入 /Applications、去隔离、重启并退出当前实例。
+        //   权限本就按「路径+签名」匹配，避免授权再次落到随机路径上（无感处理，无需用户操作）。
+        //   若无法解析原始路径（私有 API 缺失），退化为下方「建议移入」引导。
+        if handleTranslocationSelfHeal() { return }
+
+        // ② App 转移/非标准位置引导：移入「应用程序」稳定 TCC 权限（此刻 statusItem 已就绪，
+        //   弹窗不至于让应用"隐身"；权限请求放在其之后——转移路径下请求权限本就不持久）
+        offerMoveToApplicationsIfNeeded()
+
         // 应用持久化的诊断日志开关（设置页可开启；日志落 /tmp/touchpad_run.log）
         if UserDefaults.standard.bool(forKey: "engine.debugLogging") {
             GestureEngine.forceDebugLogging = true
             NodeExecutors.debugLogging = true
         }
 
-        // 权限请求：辅助功能 + 输入监控。输入监控此前从未在启动时请求——
-        // 未授权时 MTDeviceCreateList 返回空数组 → 设备扫描失败 → 应用隐身
-        if !permissionManager.accessibility.isOK {
-            permissionManager.requestAccessibility()
-        }
-        if !permissionManager.inputMonitoring.isOK {
-            permissionManager.requestInputMonitoring()
-        }
-        // 输入监控授权后自动重试触控板初始化（无需重启 app）
-        permissionManager.onInputMonitoringGranted = { [weak self] in
+        // 权限请求：仅请求本 app 真正必需的「辅助功能」。
+        // 「输入监控」是可选项——触控板读取走 MultitouchSupport 私有框架，不受 TCC 输入监控门控；
+        // 主动请求它只会弹窗误导用户，故不再请求/不再把它当功能前提。
+        permissionManager.requestRequiredPermissions()
+        // 辅助功能授权后自动重试触控板初始化（无需重启 app）
+        permissionManager.onAccessibilityGranted = { [weak self] in
             self?.setupTrackpad()
         }
 
+        // ③ 权限异常自愈：若启动后权限仍未授予（含「已允许但未生效」的多副本匹配问题），
+        //   延迟 3s 自动 tccutil 清旧授权并重新请求——否则授权可能一直落在错误的副本/随机路径上。
+        permissionManager.scheduleAutoResetIfNeeded()
+
         setupTrackpad()
+    }
+
+    // 菜单栏 app 常驻：关闭（最后一个）设置窗口不应退出应用。
+    // SwiftUI App 生命周期默认把「最后一个窗口关闭」实现为终止应用，
+    // 而本 app 唯一窗口是手动创建的设置 NSWindow——覆盖为 false 保持进程存活（状态栏图标仍在）。
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     /// 创建菜单栏图标与菜单（先于触控板初始化——菜单栏图标必须始终可见）
@@ -378,11 +395,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         setupTrackpad()
     }
 
+    /// 「移到应用程序」引导：非 /Applications 下运行的 .app（含 App Translocation 转移路径）
+    /// 弹窗让用户选择移入 /Applications，从而让 TCC 权限（输入监控/辅助功能）跨启动持久。
+    private func offerMoveToApplicationsIfNeeded() {
+        let bundlePath = Bundle.main.bundlePath
+        guard AppTranslocation.shouldOfferMoveToApplications(bundlePath: bundlePath) else { return }
+        // 用户此前勾选「不再提示」则静默跳过
+        if UserDefaults.standard.bool(forKey: "appTranslocation.neverOfferMove") { return }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = L10n.tr("建议移入「应用程序」", "Move to “Applications”")
+        alert.informativeText = L10n.tr(
+            "当前从非标准位置运行，系统权限（输入监控 / 辅助功能）可能无法跨启动保存。\n移到「应用程序」后可稳定保留权限。",
+            "Running from a non-standard location may not persist system permissions.\nMove to Applications for a stable setup.")
+        alert.addButton(withTitle: L10n.tr("移到应用程序", "Move to Applications"))
+        alert.addButton(withTitle: L10n.tr("以后再说", "Later"))
+        alert.addButton(withTitle: L10n.tr("不再提示", "Don’t ask again"))
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            let source = Bundle.main.bundleURL
+            let dest = AppTranslocation.applicationsDestination(forSource: source)
+            moveToApplications(source: source, destination: dest)
+        case .alertThirdButtonReturn:
+            UserDefaults.standard.set(true, forKey: "appTranslocation.neverOfferMove")
+        default:
+            break
+        }
+    }
+
+    /// 自动除转移 + 自愈：当前实例处于 App Translocation 随机路径时，
+    /// 取回原始路径 → 移入 /Applications → 去隔离 → 重启 → 退出当前实例。
+    /// 返回 true 表示已处理（当前实例即将退出，调用方应直接 return）。
+    private func handleTranslocationSelfHeal() -> Bool {
+        let bundleURL = Bundle.main.bundleURL
+        guard AppTranslocation.isRunningTranslocated(bundlePath: bundleURL.path) else { return false }
+        guard let original = AppTranslocation.originalURLWhenTranslocated(bundleURL: bundleURL) else { return false }
+        let destination = AppTranslocation.applicationsDestination(forSource: original)
+        moveToApplications(source: original, destination: destination)
+        return true
+    }
+
+    /// 执行移入：拷贝 source → 目标 /Applications → 去隔离属性 → 启动新实例 → 退出当前实例。
+    /// source 通常为 `Bundle.main.bundleURL`（手动路径）或自愈取回的原始路径。
+    private func moveToApplications(source: URL, destination: URL) {
+        let dest = destination
+
+        do {
+            try FileManager.default.copyItem(at: source, to: dest)
+        } catch let copyError as NSError {
+            // 目标已存在（如旧版本在 /Applications）：先移除旧副本再拷贝
+            if FileManager.default.fileExists(atPath: dest.path) {
+                do {
+                    try FileManager.default.removeItem(at: dest)
+                    try FileManager.default.copyItem(at: source, to: dest)
+                } catch {
+                    showMoveError(error)
+                    return
+                }
+            } else {
+                showMoveError(copyError)
+                return
+            }
+        }
+
+        // 去隔离：去掉 com.apple.quarantine 等扩展属性，避免新副本再次被 App Translocation 转移
+        let xattr = Process()
+        xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        xattr.arguments = ["-cr", dest.path]
+        try? xattr.run()
+        xattr.waitUntilExit()
+
+        // 启动 /Applications 里的新实例，随后退出当前（转移路径）实例。
+        // 因单实例检测已排除转移实例，新实例不会被本实例误杀。
+        NSWorkspace.shared.open(dest)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.quit()
+        }
+    }
+
+    private func showMoveError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.tr("移入「应用程序」失败", "Failed to move to Applications")
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: L10n.tr("知道了", "OK"))
+        alert.runModal()
+    }
+
     /// 单实例保护：返回 false 表示已有实例在运行
     private func ensureSingleInstance() -> Bool {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.zekiwithcat.TouchpadGestures"
         return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            .filter {
+                $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+                // App 转移（路径含 /AppTranslocation/）中的旧实例在用户选择「移到应用程序」后
+                // 即将退出；若不过滤，刚从 /Applications 启动的新实例会被旧实例误杀（同 bundleID）。
+                && !($0.bundleURL?.path.contains("/AppTranslocation/") ?? false)
+            }
             .isEmpty
     }
 

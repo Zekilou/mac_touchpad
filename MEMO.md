@@ -1,5 +1,75 @@
 # 项目备忘录
 
+## 「关闭设置窗口程序退出」修复：菜单栏 app 常驻（2026-08-31，188 tests 通过，release 已打包）
+用户报「关闭设置窗口程序退出」。根因：SwiftUI `App` 生命周期默认把「最后一个窗口关闭」实现为终止应用（`applicationShouldTerminateAfterLastWindowClosed` 默认 true），而本 app 是菜单栏（LSUIElement）app、唯一窗口是手动创建的设置 NSWindow → 关闭即退出。
+- **App.swift**：`AppDelegate` 新增覆盖 `applicationShouldTerminateAfterLastWindowClosed(_:) -> Bool { false }`——关闭设置窗口后进程存活（状态栏图标仍在，可从菜单再开设置/退出）。
+- 验证：`swift build --disable-sandbox -c release` 成功；188 tests 全过；release 包已重建 `dist/TouchpadGestures.zip`。
+- 待用户复测：打开设置 → 关闭 → app 不应退出，菜单栏图标仍在。
+
+## 「输入监控显示未授予但软件正常」修复：降级为可选提示（2026-08-31，188 tests 通过，release 已打包）
+用户报「Input Monitoring 显示未授予，但软件能正常用」。查证：app 读触控板走 `MTDeviceCreateList`（MultitouchSupport 私有框架），**不受 TCC 输入监控门控**；事件合成走 `CGEventTap` 仅被**辅助功能**门控 → app 真正必需的只有「辅助功能」，输入监控是误导项。按用户选择「降级为提示」落地：
+- **PermissionManager.swift**：`autoResetAndReprompt()` 只重置「辅助功能」（不再请求输入监控）；新增 `requestRequiredPermissions()`（仅请求辅助功能）；`allGranted` 改为只看 `accessibility.isOK`；新增 `onAccessibilityGranted` 回调 + `wasAccessibilityGranted` 边沿检测（授权瞬间触发）。
+- **App.swift**：启动改调 `requestRequiredPermissions()`；重试回调从 `onInputMonitoringGranted` 改为 `onAccessibilityGranted`（授权后自动重试触控板初始化，无需重启）。
+- **ConfigView.swift**：辅助功能移到权限栏顶部（唯一必需项）；输入监控改 `optionalPermRow`（状态中性色 + info 备注「不影响触控板，无需授权」）；新增 `optionalPermRow` builder。
+- 验证：`swift build --disable-sandbox -c release` 成功；188 tests 全过；`build_app.sh` 打 release 包完成。
+- **build_app.sh 修正**：三处 `swift build` 加 `--disable-sandbox`——代理终端环境 SwiftPM 子进程沙箱 `sandbox-exec: Operation not permitted` 会导致打包失败；该标志对用户本机正常构建无副作用。
+- 待用户复测：权限面板应显示「辅助功能」为必需、输入监控为「可选，不影响触控板」；启动不再弹输入监控授权窗。
+
+## 权限"已允许仍未授予"落地实现：自动除转移+自愈（2026-08-31，188 tests 通过，待用户复测打包）
+按用户选择（「自动除转移+自愈」「权限异常自动重置」「暂不，保持 ad-hoc」）完成，参照 Mac Mouse Fix 的 `AppTranslocationManager.m`（SecTranslocate 私有 API 自愈）与 `AccessibilityCheck.m`（tccutil 清授权再重加）：
+- **AppTranslocation.swift**：新增 `originalURLWhenTranslocated(bundleURL:)`，`dlopen` Security 框架 + `dlsym` 调 `SecTranslocateIsTranslocatedURL`/`SecTranslocateCreateOriginalPathForURL`；未转移/私有 API 缺失一律回退 `nil`（优雅降级到手动引导）。
+- **PermissionManager.swift**：新增 `autoResetAndReprompt()`（`tccutil reset InputMonitoring/Accessibility <bundleID>` 清旧授权 → 重新请求两权限 → 1.5s 后刷新）、`scheduleAutoResetIfNeeded()`（启动后 3s 若未全授权则自动自愈一次，每进程一次）、私有 `resetTCC(service:)`（调 `/usr/bin/tccutil`）。
+- **App.swift**：`applicationDidFinishLaunching` 在 `offerMoveToApplicationsIfNeeded()` 前先 `if handleTranslocationSelfHeal() { return }`——检测到转移路径则取回原始路径 → 移入 /Applications → 去隔离 → 重启 → 退出当前实例（无感，无需用户操作）；权限请求后调 `permissionManager.scheduleAutoResetIfNeeded()`。`moveToApplications` 重构为 `moveToApplications(source:destination:)`，自愈与手动引导共用。
+- **ConfigView.swift**：权限栏新增「重置授权」按钮（权限未全绿时显示），点击调 `permManager.autoResetAndReprompt()`，带 L10n 双语。
+- **AppTranslocationTests.swift**：新增 `testOriginalURLWhenTranslocated_nonTranslocatedPath_returnsNil` 验证私有 API 优雅降级。
+- **约束**：ad-hoc + TCC 按「路径+CDHash」匹配是根因（见下节诊断），以上是无稳定签名下的组合规避；彻底根治仍需稳定 Developer ID 签名。`tccutil` 在助手沙盒不可执行，需用户在本机 Terminal 手动跑或点 app 内「重置授权」按钮。
+- 验证：`swift build` 成功（仅原有 onChange/未用变量警告）；`swift test` 188 全过（原 187 + 新 1）。
+
+## 开源鼠标/触控板工具如何解决「已授权仍未生效」研究（2026-08-31，只读研究未改码）
+克隆 `/tmp/mac-mouse-fix` 与 `/tmp/linearmouse` 全源码核对，结论（供 TouchpadGestures 权限问题参考）：
+- **A. 权限 API**：两仓库**均未使用** `IOHIDCheckAccess`/`listenEventAccess`/`InputMonitoring`（grep 无匹配）；都只依赖**辅助功能** `AXIsProcessTrustedWithOptions`，因事件拦截走 `CGEventTap`（仅被辅助功能门控）。MMF 权限在 **Helper 进程**（`Helper/AccessibilityCheck.m` `checkAccessibilityAndUpdateSystemSettings`，`kAXTrustedCheckOptionPrompt=false`）；LM 在 `LinearMouse/AccessibilityPermission.swift`（`enabled`/`prompt()`/`pollingUntilEnabled`）。
+- **B. 未授权引导**：MMF 检测失败→`tccutil reset Accessibility <helperBID>` 清旧权限再重加（Ventura/Monterey 开关打不上 bug），每 0.5s 轮询授权后重启 Helper；UI 走 `AuthorizeAccessibilityView.m` + Deep Link `x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`；检测「奇怪 Helper」重复副本弹 `Alerts.m` 持久提示。LM 弹 `AccessibilityPermissionWindow`，未授权则 `exit(0)`，授权后 `Application.restart()`；无「提示移 app」形式化 UI（**未找到**）。
+- **C. 签名**：MMF 源码 pbxproj 主 app 与 Helper 均 `CODE_SIGN_IDENTITY="Apple Development"; CODE_SIGN_STYLE=Automatic; DEVELOPMENT_TEAM=LM5Z78756B`（**未找到** Developer ID）——源码默认开发签名，作者注释指出 2.2.0→2.2.1 由 Development 切 Developer Program 签名导致权限开关失效。LM 发布用稳定签名：`ExportOptions.plist` `developer-id`/`Developer ID Application`/`Manual`/`Team C5686NKYJ7`，`Scripts/sign-and-notarize` codesign+notary+staple，`Scripts/configure-code-signing` 优先 Developer ID→Apple Development→**ad-hoc 回退**。
+- **D. Helper/launchd/SMAppService**：MMF **有** SMAppService 注册的 launch agent（`HelperServices.m` `agentServiceWithPlistName:@"sm_launchd.plist"` + `sm_launchd.plist` Label=`com.nuebling.mac-mouse-fix.helper`，内嵌 `Contents/Library/LoginItems/Mac Mouse Fix Helper.app`，RunAtLoad+KeepAlive），**无** root daemon；LM 用 `LaunchAtLogin`（SMAppService 登录项），**未找到**任何 `/Library/LaunchDaemons` 安装逻辑。
+- **E. App Translocation**：两者都处理。MMF `AppTranslocationManager.m` 用 `dlopen`+`dlsym` 调 Security 私有函数 `SecTranslocateIsTranslocatedURL`/`SecTranslocateCreateOriginalPathForURL`，被转移则 `xattr -cr` 去隔离 + `open -n -a` 重启 + `terminate`（在 `AppDelegate +initialize` 先于 MessagePort 执行；注释指向 Sonoma issue #648）。LM `AppDelegate.swift` `#if !DEBUG if AppMover.moveIfNecessary() { return }`（`AppMover` 包自动搬到 /Applications，仅 release 生效）。
+- **对用户项目借鉴**：ad-hoc+TCC 按「路径+CDHash」匹配是根因；成熟工具用①稳定 Developer ID 签名②SMAppService 稳定身份注册③自动去 App Translocation 组合规避。轻量替代可用 `LaunchAtLogin`，彻底解决需稳定 Developer ID（非 ad-hoc）。
+
+## 「双击仍打开旧版/老实例重现」根因与清理（2026-08-31 晚）
+用户质疑：明明开了新版，为什么又跑回老的 `TouchpadGestures 2.app`。查明真相：
+- **真因 = LaunchServices 重复注册 + 残留进程**：同 bundleID `com.zekiwithcat.TouchpadGestures` 的副本散布在 `~/Downloads`、`dist`、`/Applications`、`AppTranslocation/`、`~/.Trash`，注册表里 20+ 条同 bundleID；macOS LaunchServices 习惯把启动路由到「最近注册」的副本，`open`/双击可能命中旧副本。
+- **残留进程**：`TouchpadGestures 2.app` 源文件已移入废纸篓，但进程（PID 26141，PPID=1 被 launchd 托管）未退出，路径字符串仍挂 `TouchpadGestures 2.app` → 用户看到「老版」。
+- **处理（仅 lsregister 取消注册 + kill，未删文件）**：①`kill` 残留老进程 ②把非 `/Applications/TouchpadGestures.app` 的全部副本从 LaunchServices `lsregister -u` 注销 ③`lsregister -f` 重新注册唯一新版 ④重启新版。
+- **验证**：注册表只剩 `/Applications/TouchpadGestures.app`；运行实例 PID 27425 路径正确且稳定。
+- **经验**：①ad-hoc app 多副本/多 Trash 副本会污染 LaunchServices 路由，双击"回到旧版"优先查 `lsregister -dump` + `pgrep` 残留进程 ②杀进程后再改文件才干净，先移文件后 kill 会留下挂旧 inode 的活进程。
+
+## 权限"已允许仍显示未授予"诊断（2026-08-31 续，待用户复测）
+用户报告：已在系统设置允许权限，但 app 仍显示"未授予"。查运行实例后确认根因：
+- 运行中实例：`/Applications/TouchpadGestures 2.app`（PID 14662，bundleID `com.zekiwithcat.TouchpadGestures`，ad-hoc 签名，CDHash `9f4de8d0...`，无隔离属性，二进制为最新 dist 构建）
+- 存在另一份旧拷贝 `~/Downloads/TouchpadGestures.app`（CDHash `54a4d55a...`，旧二进制）
+- **ad-hoc 签名 app 的 TCC 按「路径 + 签名身份(CDHash)」匹配，而非仅 bundle ID** → 用户授权的是另一份拷贝，运行中的这份其实未授权 → 显示未授予。
+- 用户已选择方案：「重置授权并引导重开（推荐）」。
+- 已查：用户级 TCC.db 不存在；系统级 TCC.db 受 SIP 保护无法读取（需 Full Disk Access）。改用 CDHash/进程比对绕过。
+- 操作：`tccutil reset InputMonitoring com.zekiwithcat.TouchpadGestures` + `tccutil reset Accessibility com.zekiwithcat.TouchpadGestures`，随后引导用户在系统设置重新授权「运行中的那份」。
+ - **执行受阻**：助手运行环境为沙盒，`tccutil` 返回 `Operation not permitted from sandbox`、`sudo` 被禁 → 无法代为执行。需用户在本机 Terminal 手动跑上述两条命令（用户自有 app，无需 sudo）。
+
+## App Translocation 移入引导（2026-08-31，187 tests 通过，release 已打包）
+用户报告 GitHub 下载的 v2.0.1 权限"开了开关仍显示未授予"。根因：带隔离属性从网上下载的 .app 被 macOS **App Translocation** 复制到随机只读路径（每启动路径变一次），TCC 权限（输入监控/辅助功能）按「签名身份+路径」绑定 → 授权落在随机路径上，下次启动路径已变被当成另一个 app → 显示未授予。无稳定签名下官方/生态推荐做法 = 把 app 放稳定位置（/Applications）+ 去隔离属性。
+- **AppTranslocation.swift（新，GestureEngine）**：纯可测逻辑 `isRunningTranslocated`/`shouldOfferMoveToApplications`/`applicationsDestination`（判定转移、是否建议移入、目标路径）。配套 7 个测试。
+- **AppDelegate 接入（App.swift）**：`applicationDidFinishLaunching` 在 `setupStatusItem()` 后调用 `offerMoveToApplicationsIfNeeded()`（弹窗文案走 L10n 双语；「不再提示」持久化 UserDefaults `appTranslocation.neverOfferMove`）。`moveToApplications()` 执行：拷贝到 /Applications → `xattr -cr` 去隔离 → `NSWorkspace.open` 启动新实例 → 0.5s 后 `quit()` 退出旧实例。
+- **单实例修复**：`ensureSingleInstance()` 过滤掉路径含 `/AppTranslocation/` 的实例——否则移入后从 /Applications 重启的新实例会被旧转移实例误杀（同 bundleID）。
+- `shouldOfferMoveToApplications` 宽松覆盖「非 /Applications 下的任何 .app」（含下载目录双击），`swift run` 裸二进制无 .app 后缀不误触发。
+- 构建：`swift build -c release` 成功（仅原有 onChange deprecation 警告）；`./scripts/build_app.sh` 打包 dist/TouchpadGestures.zip（ad-hoc 签名，macOS 15+）。
+- 待用户复测：从下载 zip 解压双击 → 应弹「建议移入应用程序」；移到后权限应跨启动保留。
+
+## v2.0.1 发布（2026-08-29，commit 0b849c7 + aceef9b）
+已发布 GitHub release `v2.0.1`：https://github.com/Zekilou/mac_touchpad/releases/tag/v2.0.1
+- 内容：H1/H2/H3 三项高危修复（见下），180 tests 全过
+- 产物：`dist/TouchpadGestures.zip`（ad-hoc 签名 .app，macOS 15+）
+- 提交：`0b849c7`（fix 三项高危）+ `aceef9b`（chore 版本号→2.0.1）
+- 标签：`v2.0.1`（annotated，已推送）
+- 备注：build_app.sh 依然存在「无条件多跑一次 swift build -c release」的小问题（DEV 记录），本轮未动；
+  本次打包已把版本号 2.0.0→2.0.1 同步到 release/dev 分支。
+
 ## 高危修复完成（2026-08-29，180 tests 通过，debug+release 均构建成功）
 应需求"开始"按优先级修复全面审视的问题。已完成 H1/H2/H3 三项高危：
 - **H1 v2 迁移路由不可达**：ConfigStore.load 改为先按顶层 version 分流（<3 先走 v2/v1 迁移），不再先 decode v3 被宽松成功。已补回归测试。
