@@ -1,5 +1,26 @@
 # 项目备忘录
 
+## 物理键盘 Option+Shift 精确调节修复（2026-09-02，180 tests 通过）
+用户原说要加「旁路开关模拟 Option+Shift」，但实际根因是：**物理键盘上手动按 Option+Shift 同时滑触控板，精确调节不生效**。
+- 根因：`SystemControl.postMediaKey` 合成 `NX_SYSDEFINED subtype=8` 媒体键事件时，把 `modifierFlags` **硬编码为 `0xA00（keyDown）/ 0xB00（keyUp）`**（系统要求的媒体键私有掩码），直接覆盖了物理键盘当前真实的修饰符状态 → macOS 完全看不到按着 Option/Shift，自然不进入精确档位。
+- 修复：每次合成事件前，在主线程读 `NSEvent.modifierFlags`（必须主线程，否则返回空集合；媒体键由 tick 线程调用，使用 `DispatchQueue.main.sync`），把真实修饰符按位或 `| mediaMask`，既保留媒体键需要的私有掩码，又叠加了物理键盘的 ⌥/⇧/⌃/⌘。所有系统原生组合（⌥⇧+音量精确 1/4 档、Shift+音量静音、⌥+亮度精确档等）在触控板触发时全部自然恢复，不需要任何开关。
+- 验证：`swift build --disable-sandbox -c release` 成功（仅历史 kIOMasterPortDefault 弃用警告，与本改无关）；`swift test` 180 全过。
+- 待用户真机复测：按住物理键盘 ⌥+⇧，触控板滑动调音量/亮度 → HUD 应走 1/4 格小步进（系统原生精确档）。
+
+## 分发改为 DMG 拖入 + 移除 App Translocation 引导（2026-08-31，180 tests 通过，DMG 已打包）
+用户要求：把分发方式从 zip 改成 dmg 拖入；去掉「引导拖入」相关代码（zip 分发时才需要，app 被 App Translocation 转移到随机路径才触发）。
+- **build_app.sh**：zip 打包（ditto）替换为 DMG——Ad-hoc 签名后在暂存目录放 `TouchpadGestures.app` + `Applications -> /Applications` 软链，`hdiutil create -volname TouchpadGestures -srcfolder <staging> -ov -format UDZO` 生成 `dist/TouchpadGestures.dmg`；删除旧 zip。已挂载验证：DMG 内含 app + Applications 拖入链接，codesign 有效。
+- **删除** `Sources/GestureEngine/AppTranslocation.swift`（isRunningTranslocated/shouldOfferMoveToApplications/applicationsDestination/originalURLWhenTranslocated）与 `Tests/GestureEngineTests/AppTranslocationTests.swift`（8 tests）。
+- **App.swift**：`applicationDidFinishLaunching` 移除 `handleTranslocationSelfHeal()`/`offerMoveToApplicationsIfNeeded()` 调用；删除 `offerMoveToApplicationsIfNeeded`/`handleTranslocationSelfHeal`/`moveToApplications`/`showMoveError` 四个方法；`ensureSingleInstance()` 移除「排除 /AppTranslocation/ 路径」过滤（原为移入流程服务）。
+- 验证：`swift build --disable-sandbox -c release` 成功（仅原 onChange 弃用警告）；`swift test` 180 全过（原 188 - 8）；`build_app.sh` 产出 DMG 并挂载签名校验通过。
+- 注意：DMG 拖入后 app 位于 /Applications 稳定路径，TCC 权限（辅助功能）按路径+签名匹配可跨启动保留，不再需要「建议移入」引导。
+
+## v2.0.2 发布（2026-08-31，commit 83c9614）
+已发布 GitHub release `v2.0.2`：https://github.com/Zekilou/mac_touchpad/releases/tag/v2.0.2
+- 资产：`TouchpadGestures.zip`（ad-hoc 签名，macOS 15+）
+- 修复：**App 转译自愈**（新增 AppTranslocation.swift，路径+CDHash 匹配 TCC 解决「已允许仍未授予」）、**输入监控降级为可选提示**（辅助功能为唯一必需项，启动不再弹输入监控授权窗）、**关闭设置窗口不再退出**（applicationShouldTerminateAfterLastWindowClosed→false）、**build_app.sh 加 --disable-sandbox** + 版本号 2.0.1→2.0.2。
+- 提交：`83c9614`（fix(permissions)），annotated tag `v2.0.2` 已推送 main + 标签。
+
 ## 「关闭设置窗口程序退出」修复：菜单栏 app 常驻（2026-08-31，188 tests 通过，release 已打包）
 用户报「关闭设置窗口程序退出」。根因：SwiftUI `App` 生命周期默认把「最后一个窗口关闭」实现为终止应用（`applicationShouldTerminateAfterLastWindowClosed` 默认 true），而本 app 是菜单栏（LSUIElement）app、唯一窗口是手动创建的设置 NSWindow → 关闭即退出。
 - **App.swift**：`AppDelegate` 新增覆盖 `applicationShouldTerminateAfterLastWindowClosed(_:) -> Bool { false }`——关闭设置窗口后进程存活（状态栏图标仍在，可从菜单再开设置/退出）。

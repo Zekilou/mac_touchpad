@@ -73,13 +73,25 @@ public enum SystemControl {
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastKeyTime >= keyInterval else { return }   // 节流：丢弃超频按键
         lastKeyTime = now
+        // 物理键盘当前真正按下的修饰符：让 ⌥⇧+音量（精确 1/4 档）、Shift+音量（静音等）
+        // 等系统原生组合在触控板触发时同样生效。
+        // 注意：NSEvent.modifierFlags 必须在主线程读，否则返回空集合；
+        // 媒体键由引擎 tick 线程（非主）调用，所以同步切主线程取一次。
+        let physicalFlags: NSEvent.ModifierFlags
+        if Thread.isMainThread {
+            physicalFlags = NSEvent.modifierFlags
+        } else {
+            physicalFlags = DispatchQueue.main.sync { NSEvent.modifierFlags }
+        }
         // data1 格式: (keyType << 16) | (keyState << 8) | keyRepeat
         // keyState: 0x0A = keyDown, 0x0B = keyUp
-        // modifierFlags 必须与 keyState 一致，否则系统不响应
+        // NSEvent.ModifierFlags(rawValue: 0xA00/0xB00) 是媒体键的私有掩码（非标准修饰符），
+        // 必须保留，否则系统不响应。在此基础上叠加物理键盘的真实修饰符。
         func post(_ key: Int32, down: Bool) {
             let state: Int32 = down ? 0x0A : 0x0B
             let data1 = Int((key << 16) | (state << 8))
-            let flags = NSEvent.ModifierFlags(rawValue: UInt(down ? 0xA00 : 0xB00))
+            let mediaMask: UInt = down ? 0xA00 : 0xB00
+            let flags = NSEvent.ModifierFlags(rawValue: physicalFlags.rawValue | mediaMask)
             let event = NSEvent.otherEvent(
                 with: .systemDefined,
                 location: .zero,

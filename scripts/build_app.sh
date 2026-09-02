@@ -14,12 +14,12 @@ OUTPUT_DIR="${2:-$PROJECT_DIR/dist}"
 if [ "$MODE" = "dev" ]; then
     echo "==> [开发版] swift build (debug，含诊断模块)"
     swift build --disable-sandbox
-    VERSION="2.0.2-dev"
+    VERSION="2.0.3-dev"
     BUILD_NUM="$(date +%Y%m%d)"      # 日期构建号，区分不同 dev 包
 else
     echo "==> [正式版] swift build -c release（不含诊断模块）"
     swift build --disable-sandbox -c release
-    VERSION="2.0.2"
+    VERSION="2.0.3"
     BUILD_NUM="1"
 fi
 
@@ -126,28 +126,30 @@ done
 iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null || echo "[warn] iconutil 失败，跳过 icns"
 rm -rf "$ICONSET"
 
-echo "==> 打包 zip"
-cd "$OUTPUT_DIR"
-ZIP_NAME="$APP_NAME.zip"
-[ "$MODE" = "dev" ] && ZIP_NAME="$APP_NAME-dev.zip"
-rm -f "$ZIP_NAME"
-ditto -c -k --keepParent "$APP_NAME.app" "$ZIP_NAME"
-
 # 解压后会出现 "已损坏" 提示：未签名 + com.apple.quarantine 属性导致 Gatekeeper 拦截
 # ad-hoc 签名可消除 "damaged" 提示（仍会提示"无法验证开发者"，用户右键打开即可）
 echo "==> Ad-hoc 签名 (消除 damaged 提示)"
 codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | tail -5 || echo "[warn] codesign 失败"
 codesign --verify --verbose=1 "$APP_BUNDLE" 2>&1 | tail -3 || true
 
-# 重新打包签名后的版本
-rm -f "$ZIP_NAME"
-ditto -c -k --keepParent "$APP_NAME.app" "$ZIP_NAME"
+echo "==> 打包 DMG (拖入 Applications 安装)"
+STAGING="$OUTPUT_DIR/dmg_staging"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+cp -R "$APP_BUNDLE" "$STAGING/$APP_NAME.app"
+ln -s /Applications "$STAGING/Applications"
+
+DMG_NAME="$APP_NAME.dmg"
+[ "$MODE" = "dev" ] && DMG_NAME="$APP_NAME-dev.dmg"
+rm -f "$OUTPUT_DIR/$DMG_NAME"
+hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$OUTPUT_DIR/$DMG_NAME"
+rm -rf "$STAGING"
 
 echo "==> 完成"
 echo "    App:   $APP_BUNDLE"
-echo "    Zip:   $OUTPUT_DIR/$ZIP_NAME"
+echo "    DMG:   $OUTPUT_DIR/$DMG_NAME"
 echo ""
 echo "    用户首次打开方式："
-echo "    1. 解压 zip"
-echo "    2. 终端执行: xattr -cr TouchpadGestures.app"
-echo "    3. 或右键 → 打开（绕过 Gatekeeper）"
+echo "    1. 双击挂载 DMG"
+echo "    2. 把 TouchpadGestures.app 拖入「应用程序」"
+echo "    3. 首次打开若被 Gatekeeper 拦截：右键 → 打开"
