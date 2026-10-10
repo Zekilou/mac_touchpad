@@ -50,7 +50,7 @@ public enum TimelineGraphValidator {
         // 0. 节点 ID 集合 + 节点表（写边判定用）
         let nodeIDs = Set(timeline.nodes.map(\.id))
         guard !nodeIDs.isEmpty else { return .valid(order: []) }
-        let nodes = Dictionary(uniqueKeysWithValues: timeline.nodes.map { ($0.id, $0) })
+        let nodes = Dictionary(timeline.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let isIgnored: (Edge) -> Bool = ignoreWriteEdges ? { isWriteEdge($0, nodes: nodes) } : { _ in false }
 
         // 1. 校验悬挂边（所有边都查，含写边）

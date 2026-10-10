@@ -76,4 +76,57 @@ final class ConfigRobustnessTests: XCTestCase {
         XCTAssertEqual(second.events.count, first.events.count,
                        "二次 load 不应再次增删事件")
     }
+
+    // MARK: - Timeline 结构卫生（重复 id / 悬空边）
+
+    /// 回归：重复节点 id 曾让多处 `Dictionary(uniqueKeysWithValues:)` 直接 Fatal error。
+    /// 解码必须去重并保留第一个，而不是崩溃。
+    func testTimelineDecodeDeduplicatesNodeIDs() throws {
+        let dupID = UUID().uuidString
+        let json = """
+        {"id":"\(UUID().uuidString)","trigger":"onTick",
+         "nodes":[
+           {"id":"\(dupID)","type":"value","params":{},"x":0,"y":0,"title":"a"},
+           {"id":"\(dupID)","type":"scale","params":{},"x":0,"y":0,"title":"b"}
+         ],
+         "edges":[],"entryNodeIDs":["\(dupID)"]}
+        """.data(using: .utf8)!
+        let tl = try JSONDecoder().decode(TimelineConfig.self, from: json)
+        XCTAssertEqual(tl.nodes.count, 1, "重复 id 应只保留第一个节点")
+        XCTAssertEqual(tl.nodes[0].title, "a", "应保留先出现的节点")
+        // 关键回归：去重后能安全建索引并校验通过（原实现会在建 [UUID:NodeConfig] 时 Fatal error）
+        XCTAssertNotNil(GraphEvaluator(timeline: tl), "去重后应能正常构造执行器")
+    }
+
+    /// 回归：端点不存在的边必须被丢弃，否则执行期静默无效果 / 校验异常。
+    func testTimelineDecodeDropsDanglingEdges() throws {
+        let a = UUID().uuidString
+        let ghost = UUID().uuidString
+        let json = """
+        {"id":"\(UUID().uuidString)","trigger":"onTick",
+         "nodes":[{"id":"\(a)","type":"value","params":{},"x":0,"y":0,"title":"a"}],
+         "edges":[{"from":{"nodeID":"\(a)","portName":"value"},
+                   "to":{"nodeID":"\(ghost)","portName":"value"}}],
+         "entryNodeIDs":["\(ghost)"]}
+        """.data(using: .utf8)!
+        let tl = try JSONDecoder().decode(TimelineConfig.self, from: json)
+        XCTAssertTrue(tl.edges.isEmpty, "悬空边应被丢弃")
+        XCTAssertTrue(tl.entryNodeIDs.isEmpty, "指向不存在节点的 entryNodeID 应被剔除")
+    }
+
+    /// 子图同样要清理（模块内部重复 id 会让 ModuleEvaluatorCache 建表时崩溃）
+    func testNestedSubgraphIsSanitized() throws {
+        let dupID = UUID().uuidString
+        let json = """
+        {"id":"\(UUID().uuidString)","trigger":"onTick",
+         "nodes":[{"id":"\(UUID().uuidString)","type":"module","params":{},"x":0,"y":0,"title":"m",
+           "subgraph":{"id":"\(UUID().uuidString)","trigger":"onTick",
+             "nodes":[{"id":"\(dupID)","type":"value","params":{},"x":0,"y":0,"title":"s1"},
+                      {"id":"\(dupID)","type":"scale","params":{},"x":0,"y":0,"title":"s2"}],
+             "edges":[],"entryNodeIDs":["\(dupID)"]}}],
+         "edges":[],"entryNodeIDs":[]}
+        """.data(using: .utf8)!
+        let tl = try JSONDecoder().decode(TimelineConfig.self, from: json)
+        XCTAssertEqual(tl.nodes[0].subgraph?.nodes.count, 1, "子图内重复 id 也应去重")
+    }
 }

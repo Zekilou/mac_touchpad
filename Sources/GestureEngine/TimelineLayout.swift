@@ -40,7 +40,7 @@ public enum TimelineLayout {
     /// 布局主流程（含分组/层，供测试断言同组数据边方向）
     static func computeLayout(of timeline: TimelineConfig,
                               heights: [UUID: CGFloat] = [:]) -> LayoutResult {
-        let types = Dictionary(uniqueKeysWithValues: timeline.nodes.map { ($0.id, $0) })
+        let types = Dictionary(timeline.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         func isWrite(_ e: Edge) -> Bool { TimelineGraphValidator.isWriteEdge(e, nodes: types) }
         let isGroup: (UUID) -> Bool = { types[$0]?.type == .group }
 
@@ -146,7 +146,7 @@ public enum TimelineLayout {
         }
 
         // 组内层内排序（父均值升序减少交叉；无父的根按原始顺序，主源在上）
-        let orderIndex = Dictionary(uniqueKeysWithValues: timeline.nodes.enumerated().map { ($0.element.id, $0.offset) })
+        let orderIndex = Dictionary(timeline.nodes.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
         var inLayerIndex: [UUID: Int] = [:]
         var groupNodes: [Int: [UUID]] = [:]
         for (id, g) in groupOf { groupNodes[g, default: []].append(id) }

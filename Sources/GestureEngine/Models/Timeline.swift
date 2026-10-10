@@ -136,6 +136,10 @@ public enum NodeType: String, Codable, CaseIterable {
 
     /// 自定义 decode：旧配置里的 "signal"（单选信号源）→ touchData（多输出数据源）；
     /// "trigger" → pipeOut（管道出口）；"recognize" → recognizer（识别器）
+    ///
+    /// 未知类型**保留降级**为 pipeOut 而不是抛错：抛错会让整个配置文件解码失败，
+    /// 一个未知节点就抹掉用户全部手势（比降级严重得多）。但降级必须**可见**——
+    /// 否则新版配置/改名/手误会让图语义静默改变并被回存，用户无从察觉。
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         if raw == "signal" {
@@ -147,6 +151,8 @@ public enum NodeType: String, Codable, CaseIterable {
         } else if let t = NodeType(rawValue: raw) {
             self = t
         } else {
+            fputs("[Timeline] 未知节点类型 \"\(raw)\" → 降级为 pipeOut（该链行为会改变；"
+                  + "可能来自更新版本的配置）\n", stderr)
             self = .pipeOut
         }
     }
@@ -578,6 +584,54 @@ public struct TimelineConfig: Codable, Identifiable, Hashable {
     public func incomingEdges(to nodeID: UUID) -> [Edge] {
         edges.filter { $0.to.nodeID == nodeID }
     }
+
+    /// 结构卫生：去重节点 id、丢弃悬空边、剔除指向不存在节点的 entryNodeIDs，递归处理子图。
+    ///
+    /// 必须在解码后调用：多处代码用 `Dictionary(uniqueKeysWithValues:)` 建 id→节点 表
+    /// （GraphEvaluator/TimelineGraphValidator/TimelineLayout/GestureConfig/画布自动整理），
+    /// 该初始化器遇重复 key 会 **Fatal error** 直接崩溃。而 config.json 是可手改的、
+    /// 粘贴/合并也可能带进重复 id，故在入口处一次性清理，从根上消除崩溃面。
+    public func sanitized() -> TimelineConfig {
+        var seen = Set<UUID>()
+        var uniqueNodes: [NodeConfig] = []
+        uniqueNodes.reserveCapacity(nodes.count)
+        for var node in nodes {
+            // 重复 id：保留第一个，丢弃后来的（保持原有顺序与连线语义）
+            if !seen.insert(node.id).inserted {
+                fputs("[Timeline] 丢弃重复节点 id \(node.id)（type=\(node.type.rawValue)）\n", stderr)
+                continue
+            }
+            // 递归清理子图（模块内部同样可能重复/悬空）
+            if let sub = node.subgraph {
+                node.subgraph = sub.sanitized()
+            }
+            uniqueNodes.append(node)
+        }
+        // 悬空边：任一端点不在清理后的节点集合里 → 丢弃（否则执行期静默无效果）
+        let validIDs = Set(uniqueNodes.map(\.id))
+        let validEdges = edges.filter { validIDs.contains($0.from.nodeID) && validIDs.contains($0.to.nodeID) }
+        if validEdges.count != edges.count {
+            fputs("[Timeline] 丢弃 \(edges.count - validEdges.count) 条悬空边（端点节点不存在）\n", stderr)
+        }
+        var result = self
+        result.nodes = uniqueNodes
+        result.edges = validEdges
+        result.entryNodeIDs = entryNodeIDs.filter { validIDs.contains($0) }
+        return result
+    }
+
+    /// 解码后自动做结构卫生（去重/去悬空边），使任何构造路径都不会产生重复 id
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedID = try c.decode(UUID.self, forKey: .id)
+        let decodedTrigger = try c.decode(TriggerEvent.self, forKey: .trigger)
+        let decodedNodes = try c.decode([NodeConfig].self, forKey: .nodes)
+        let decodedEdges = try c.decode([Edge].self, forKey: .edges)
+        let decodedEntries = try c.decodeIfPresent([UUID].self, forKey: .entryNodeIDs) ?? []
+        self.init(id: decodedID, trigger: decodedTrigger, nodes: decodedNodes,
+                  edges: decodedEdges, entryNodeIDs: decodedEntries)
+        self = sanitized()
+    }
 }
 
 // MARK: - 嵌套子图导航（H2：module 无子图 → 静默回退/写回自引用）
@@ -679,6 +733,8 @@ extension Predicate {
         case "not":
             self = .not(try c.decode(Predicate.self, forKey: .value))
         default:
+            // 同 NodeType：保留降级（抛错会连带整个配置失效）但必须可见
+            fputs("[Timeline] 未知 predicate kind \"\(kind)\" → 降级为 atBoundary\n", stderr)
             self = .atBoundary
         }
     }

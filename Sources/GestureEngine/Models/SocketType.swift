@@ -338,7 +338,7 @@ extension TimelineConfig {
     /// 返回的新节点/边由 UI 追加到图并选中。
     public func pasteClip(_ nodes: [NodeConfig], _ edges: [Edge], dx: Double, dy: Double)
         -> (nodes: [NodeConfig], edges: [Edge]) {
-        let idMap = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, UUID()) })
+        let idMap = Dictionary(nodes.map { ($0.id, UUID()) }, uniquingKeysWith: { a, _ in a })
         let newNodes = nodes.map { n in
             NodeConfig(id: idMap[n.id]!,
                        type: n.type,

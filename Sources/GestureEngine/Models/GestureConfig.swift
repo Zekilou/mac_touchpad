@@ -164,7 +164,7 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
             timeline.nodes[i].params.source = nil
         }
         // 2) 旧端口名迁移（按节点类型映射到注册表端口名）
-        let typesByID = Dictionary(uniqueKeysWithValues: timeline.nodes.map { ($0.id, $0.type) })
+        let typesByID = Dictionary(timeline.nodes.map { ($0.id, $0.type) }, uniquingKeysWith: { a, _ in a })
         for j in timeline.edges.indices {
             let edge = timeline.edges[j]
             if let fromType = typesByID[edge.from.nodeID] {

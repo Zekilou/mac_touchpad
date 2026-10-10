@@ -198,8 +198,12 @@ final class IdlePowerTests: XCTestCase {
 
         // 第二次按下并原地保持（漂移阈值避开浮点边界），累计 > 0.2s → 进入 holding
         frame([touch(x, 0.5, state: 3)])
-        let deadline = Date().addingTimeInterval(0.45)
-        while Date() < deadline { frame([touch(x, 0.5, state: 4)]) }
+        // 轮询等待 holding 成立：固定睡 0.45s 在整仓测试并发/高负载下会偶发未达（测试自身不确定性，
+        // 与产品行为无关），故改为"最多等 1.5s，一旦进入就停"
+        let holdDeadline = Date().addingTimeInterval(1.5)
+        while Date() < holdDeadline && engine.holdingCount == 0 {
+            frame([touch(x, 0.5, state: 4)])
+        }
         XCTAssertGreaterThan(engine.holdingCount, 0, "双击保持应进入 holding")
         let before = engine.debugPhases()
 

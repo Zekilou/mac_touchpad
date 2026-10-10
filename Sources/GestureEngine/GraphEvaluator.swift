@@ -71,7 +71,9 @@ public final class GraphEvaluator {
         }
         self.incomingByNode = incoming
         self.outgoingByNode = outgoing
-        self.nodesByID = Dictionary(uniqueKeysWithValues: timeline.nodes.map { ($0.id, $0) })
+        // 用 uniquingKeysWith 而非 uniqueKeysWithValues：后者遇重复 id 会 Fatal error。
+        // TimelineConfig.sanitized() 已在解码处去重，此处是纵深防御。
+        self.nodesByID = Dictionary(timeline.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     }
 
     /// 执行一次 evaluate（一帧/一次触发事件）

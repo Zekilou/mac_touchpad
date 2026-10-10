@@ -54,4 +54,34 @@ final class RegionConfigTests: XCTestCase {
             }
         }
     }
+
+    /// 回归：xMin > xMax（用户拖四个独立滑杆一步可达）时不得让手势静默失效。
+    /// 原实现直接比较 `x >= xMin && x <= xMax`，反向区间恒 false。
+    func testContains_handlesInvertedBounds() {
+        let r = RegionConfig(name: "inv", xMin: 0.8, xMax: 0.2, yMin: 0.7, yMax: 0.3)
+        XCTAssertTrue(r.contains(x: 0.5, y: 0.5), "反向区间应按 min/max 归一化后判定")
+        XCTAssertFalse(r.contains(x: 0.1, y: 0.5), "区间外仍应判 false")
+    }
+
+    /// 解码后自动规范化：越界值钳到 0...1，反向值摆正。
+    func testDecodeNormalizesInvalidBounds() throws {
+        let json = """
+        {"id":"\(UUID().uuidString)","name":"bad","xMin":1.5,"xMax":-0.5,"yMin":0.7,"yMax":0.3}
+        """.data(using: .utf8)!
+        let r = try JSONDecoder().decode(RegionConfig.self, from: json)
+        XCTAssertEqual(r.xMin, 0, "越界下界应钳到 0")
+        XCTAssertEqual(r.xMax, 1, "越界上界应钳到 1")
+        XCTAssertEqual(r.yMin, 0.3, "反向 y 应摆正")
+        XCTAssertEqual(r.yMax, 0.7)
+        XCTAssertTrue(r.contains(x: 0.5, y: 0.5), "规范化后应能正常命中")
+    }
+
+    func testNormalizeClampsAndOrders() {
+        var r = RegionConfig(name: "x", xMin: -2, xMax: 3, yMin: 0.9, yMax: 0.1)
+        r.normalize()
+        XCTAssertEqual(r.xMin, 0)
+        XCTAssertEqual(r.xMax, 1)
+        XCTAssertEqual(r.yMin, 0.1)
+        XCTAssertEqual(r.yMax, 0.9)
+    }
 }

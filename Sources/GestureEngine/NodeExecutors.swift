@@ -594,7 +594,10 @@ public enum NodeExecutors {
     private static func invalidOutputs(_ node: NodeConfig) -> NodeExecutionResult {
         let sockets = NodeTypeDef.outputSockets(of: node)
         guard !sockets.isEmpty else { return .init() }
-        return NodeExecutionResult(outputs: Dictionary(uniqueKeysWithValues: sockets.map { ($0.name, SocketValue.invalid()) }))
+        // uniquingKeysWith：模块若声明了两个同名输出端口，后者不覆盖前者而是保留先者，
+        // 不再因重复 key 直接崩溃（模块编辑器此前无唯一性校验）
+        return NodeExecutionResult(outputs: Dictionary(sockets.map { ($0.name, SocketValue.invalid()) },
+                                                      uniquingKeysWith: { a, _ in a }))
     }
 
     private static func compare(_ v: Float, _ cmp: Comparator, _ thr: Float) -> Bool {

@@ -240,9 +240,10 @@ struct TimelineGraphView: View {
     private func autoLayout() {
         // 传入节点显示高度：层内垂直按实际高度累计排布，卡片展开后不重叠
         let tl = currentTimeline
-        let heights = Dictionary(uniqueKeysWithValues: tl.nodes
+        let heights = Dictionary(tl.nodes
             .filter { $0.type != .group }
-            .map { ($0.id, tl.nodeDisplayHeight($0)) })
+            .map { ($0.id, tl.nodeDisplayHeight($0)) },
+            uniquingKeysWith: { a, _ in a })
         let positions = TimelineLayout.layoutPositions(of: tl, heights: heights)
         withAnimation(.easeInOut(duration: 0.3)) {
             var t = tl
