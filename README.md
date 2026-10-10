@@ -4,7 +4,8 @@
 > 双击触控板边缘保持滑动，或 Force 按压保持滑动，精确调节，带刻度震动反馈。
 
 ![platform](https://img.shields.io/badge/platform-macOS%2015%2B-blue)
-![language](https://img.shields.io/badge/language-Swift%205.9-orange)
+![swift](https://img.shields.io/badge/swift--tools-6.0-orange)
+![language](https://img.shields.io/badge/language--mode-Swift%205-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 ## 功能
@@ -27,17 +28,17 @@
 
 - macOS 15 (Sequoia) 或更高
 - MacBook 内置触控板（MultitouchSupport.framework 兼容机型）
-- 需授予「输入监控」权限（读取触控板数据）
-- 使用「系统媒体键」模式需额外授予「辅助功能」权限（模拟媒体键触发 HUD）
+- 需授予「辅助功能」权限（模拟媒体键触发系统 HUD）
+- 「输入监控」**无需**授予：触控板数据走 MultitouchSupport 私有框架，不受 TCC 输入监控门控
 
 ## 下载安装
 
 ### 方式一：直接下载 Release（推荐）
 
-1. 前往 [Releases](https://github.com/Zekilou/mac_touchpad/releases) 下载最新版 `TouchpadGestures.app.zip`
-2. 解压后拖入「应用程序」文件夹
-3. 首次运行在「系统设置 → 隐私与安全性 → 输入监控」中授予权限
-4. 使用「系统媒体键」模式还需在「辅助功能」中添加并启用 TouchpadGestures
+1. 前往 [Releases](https://github.com/Zekilou/mac_touchpad/releases) 下载最新版 `TouchpadGestures.dmg`
+2. 双击挂载，把 `TouchpadGestures.app` 拖入「应用程序」
+3. 首次打开若被 Gatekeeper 拦截：右键 →「打开」
+4. 在「系统设置 → 隐私与安全性 → 辅助功能」中添加并启用 TouchpadGestures
 
 ### 方式二：从源码构建
 
@@ -65,6 +66,7 @@ swift run TouchpadGestures
 | **事件** | 动作目标（音量/亮度）、方向映射、执行方式（媒体键/直接 API）、步长、边界阈值 |
 | **区域** | 手势触发区域矩形坐标 + 可视化预览 |
 | **形态识别** | 手指识别（接触面积范围）、手掌过滤开关、触摸阶段参考 |
+| **波形** | 自定义触觉波形（包络/音调/力度乘法器）编辑、试听与预设管理 |
 | **设置** | 语言、触摸数据流、软件信息、启动、菜单栏图标、App 图标、配置默认值 |
 
 ## 技术实现

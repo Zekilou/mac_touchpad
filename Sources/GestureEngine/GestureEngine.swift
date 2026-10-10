@@ -26,7 +26,9 @@ public final class GestureEngine {
             configLock.lock()
             _config = newValue
             configLock.unlock()
-            ConfigStore.save(newValue)
+            // UI 编辑走防抖合并：拖一个滑杆会每帧触发 setter，原先每次都同步编码 + 原子落盘
+            // （N 次/秒，卡帧 + SSD 磨损）。合并后 300ms 内的连续修改只写最后一次。
+            ConfigStore.saveCoalesced(newValue)
         }
     }
     /// 锁内原子"读-改-写"：与主线程 UI 编辑互斥（同一临界区内按 eventID 实时重查索引，
@@ -36,7 +38,7 @@ public final class GestureEngine {
         mutate(&_config)
         let saved = _config
         configLock.unlock()
-        ConfigStore.save(saved)
+        ConfigStore.saveCoalesced(saved)
     }
     public var deviceID: UInt64 = 0
 

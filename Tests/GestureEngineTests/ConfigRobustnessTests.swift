@@ -17,6 +17,8 @@ final class ConfigRobustnessTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // 防抖队列可能仍有待写项指向本用例的临时文件 → 先落盘清空，再拆目录
+        ConfigStore.flushPendingSave()
         ConfigStore.overrideConfigURL = nil
         try? FileManager.default.removeItem(at: tmpDir)
     }
@@ -128,5 +130,44 @@ final class ConfigRobustnessTests: XCTestCase {
         """.data(using: .utf8)!
         let tl = try JSONDecoder().decode(TimelineConfig.self, from: json)
         XCTAssertEqual(tl.nodes[0].subgraph?.nodes.count, 1, "子图内重复 id 也应去重")
+    }
+
+    // MARK: - 合并写入（防抖）
+
+    /// 连续多次 saveCoalesced 只应在窗口结束后落盘一次，且内容是**最后一次**提交的配置。
+    func testCoalescedSaveWritesOnlyLatestConfig() throws {
+        var first = AppConfig()
+        first.gestures[0].name = "FIRST"
+        var second = first
+        second.gestures[0].name = "SECOND"
+
+        ConfigStore.saveCoalesced(first)
+        ConfigStore.saveCoalesced(second)   // 覆盖前一次
+
+        // 窗口内不应已落盘（或至少最终结果必须是 SECOND）
+        let deadline = Date().addingTimeInterval(3.0)
+        var landed: String?
+        while Date() < deadline {
+            if let data = try? Data(contentsOf: configURL),
+               let cfg = try? JSONDecoder().decode(AppConfig.self, from: data) {
+                landed = cfg.gestures.first?.name
+                if landed == "SECOND" { break }
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(landed, "SECOND", "防抖合并后应落盘最后一次提交的配置")
+    }
+
+    /// flushPendingSave 必须立即落盘，保证退出路径不丢修改。
+    func testFlushPendingSaveWritesImmediately() throws {
+        var cfg = AppConfig()
+        cfg.gestures[0].name = "FLUSHED"
+        ConfigStore.saveCoalesced(cfg)
+        ConfigStore.flushPendingSave()
+
+        let data = try Data(contentsOf: configURL)
+        let reloaded = try JSONDecoder().decode(AppConfig.self, from: data)
+        XCTAssertEqual(reloaded.gestures.first?.name, "FLUSHED",
+                       "flush 应同步落盘，不能等防抖窗口")
     }
 }

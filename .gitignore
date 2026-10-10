@@ -17,10 +17,21 @@ DerivedData/
 *.app
 *.dmg
 *.zip
+# 打包脚本的输出目录（scripts/build_app.sh 会在此生成 .app / .dmg / dmg_staging）
+dist/
+
+# 研究用一次性产物（探针程序与私有框架 dump 留在本地，不入库）
+docs/research/probe_*.c
 
 # IDE
 .vscode/
 .idea/
 
 # 项目运行时配置（用户本地状态，不入库）
-# config.json / appsettings.json / default.json 由运行时生成在 ~/Library/Application Support/TouchpadGestures/
+# 实际位置：~/Library/Application Support/TouchpadGestures/{config,appsettings,default}.json
+# 若有人把配置拷进工作区，下面的规则可防止误提交
+config.json
+appsettings.json
+default.json
+config.corrupt-*.json
+

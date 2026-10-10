@@ -532,6 +532,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
 
     @objc func quit() {
         engine.stop()
+        // 防抖窗口内可能还有未落盘的配置修改 → 退出前强制刷盘，避免丢最后一次编辑
+        ConfigStore.flushPendingSave()
         if let dev = firstDev { mt_stop_touch(dev) }
         mt_release_devices_array(touchArrayPtr)   // 归还设备 CFArray（quit 前释放）
         touchArrayPtr = nil
@@ -541,6 +543,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             statusItem = nil
         }
         NSApp.terminate(nil)
+    }
+
+    /// 应用即将退出（含 Cmd+Q / 系统注销）时也刷盘
+    func applicationWillTerminate(_ notification: Notification) {
+        engine.stop()
+        ConfigStore.flushPendingSave()
     }
 
     func updateConfig(_ newConfig: AppConfig) {

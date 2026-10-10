@@ -335,6 +335,51 @@ public enum ConfigStore {
         }
     }
 
+    // MARK: - 合并写入（防抖）
+
+    /// 待写入的最新配置 + 其调度状态。
+    /// 目的：UI 拖动一个滑杆会产生 **每一帧一次** `engine.config = ...` → 原实现每次都
+    /// 同步 JSON 编码 + 原子落盘（N 次/秒），既卡帧又磨损 SSD。改为合并：短时间内多次
+    /// 保存只落盘最后一次，且写盘移到专用串行队列（不阻塞主线程/tick 线程）。
+    private static let saveQueue = DispatchQueue(label: "com.touchpad.config.save", qos: .utility)
+    private static let pendingLock = NSLock()
+    private static var pendingConfig: AppConfig?
+    private static var pendingWorkItem: DispatchWorkItem?
+    /// 合并窗口：略大于一帧（16ms），既能吸收拖拽期间的高频写入，又保证用户松手后很快落盘
+    private static let saveDebounceInterval: DispatchTimeInterval = .milliseconds(300)
+
+    /// 防抖保存：把最新配置排入待写，300ms 内的后续调用覆盖前一次。
+    /// - Note: 进程退出路径请调用 `flushPendingSave()` 确保不丢最后一次修改。
+    public static func saveCoalesced(_ config: AppConfig) {
+        guard mayPersist else { return }
+        pendingLock.lock()
+        pendingConfig = config
+        pendingWorkItem?.cancel()
+        let item = DispatchWorkItem {
+            pendingLock.lock()
+            let toWrite = pendingConfig
+            pendingConfig = nil
+            pendingWorkItem = nil
+            pendingLock.unlock()
+            if let toWrite { saveQueue.async { _ = save(toWrite) } }
+        }
+        pendingWorkItem = item
+        pendingLock.unlock()
+        // 在全局队列延迟触发（而非主队列）：即便主线程正忙于 SwiftUI 渲染也能准时落盘
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + saveDebounceInterval, execute: item)
+    }
+
+    /// 立即把待写配置落盘（退出/关窗时调用，避免防抖窗口内的修改丢失）。
+    public static func flushPendingSave() {
+        pendingLock.lock()
+        let toWrite = pendingConfig
+        pendingConfig = nil
+        pendingWorkItem?.cancel()
+        pendingWorkItem = nil
+        pendingLock.unlock()
+        if let toWrite { _ = save(toWrite) }
+    }
+
     // MARK: - 迁移
 
     /// v2 → v3：每个 v2 手势用迁移器生成 Timeline 图集
