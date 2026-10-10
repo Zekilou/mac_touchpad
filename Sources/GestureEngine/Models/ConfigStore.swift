@@ -74,8 +74,19 @@ public enum ConfigStore {
     }
 
     /// 加载配置（自动迁移 v1 / v2 → v3）
+    ///
+    /// **损坏防护**：JSON 无法解析时绝不直接丢弃用户配置。原实现任何读取/解码失败都返回
+    /// `AppConfig()`（4 个全新随机 UUID 手势），随后任意一次 UI 编辑就会把这份空配置
+    /// 覆写回真实 `config.json`，用户原配置不可恢复。现在改为：损坏文件先备份为
+    /// `config.corrupt-<时间戳>.json` 并打印 stderr，再回退默认值——数据始终可从备份取回。
     public static func load() -> AppConfig {
-        guard let data = try? Data(contentsOf: configURL) else {
+        let url = configURL
+        let fileExists = FileManager.default.fileExists(atPath: url.path)
+        guard let data = try? Data(contentsOf: url) else {
+            // 文件存在但读不出（权限/半写）→ 隔离备份；文件本就不存在（首次运行）→ 静默默认
+            if fileExists {
+                quarantineCorruptConfig(reason: "读取失败（权限或文件不完整）")
+            }
             return AppConfig()
         }
         // 版本探测（H1 修复）：v2 JSON 顶层 version=2 且键集合与 AppConfig 重合，若先 decode v3
@@ -94,6 +105,7 @@ public enum ConfigStore {
                 save(migrated)
                 return migrated
             }
+            quarantineCorruptConfig(reason: "version=\(version) 但 v2/v1 均解码失败")
             return AppConfig()
         }
         if version == nil, let v1 = try? JSONDecoder().decode(V1Config.self, from: data) {
@@ -206,7 +218,28 @@ public enum ConfigStore {
             save(migrated)
             return migrated
         }
+        quarantineCorruptConfig(reason: "v3/v2/v1 全部解码失败")
         return AppConfig()
+    }
+
+    /// 把损坏的 config.json 隔离备份（绝不在原地丢弃用户数据）。
+    /// 备份文件名带时间戳，保留原始字节以便人工恢复；同时打印 stderr 便于排查。
+    /// 备份成功后原文件会被移走，避免后续 save 把默认值写回原路径时"看起来正常"。
+    private static func quarantineCorruptConfig(reason: String) {
+        guard mayPersist else { return }
+        let src = configURL
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let backup = src.deletingLastPathComponent()
+            .appendingPathComponent("config.corrupt-\(stamp).json")
+        do {
+            try FileManager.default.moveItem(at: src, to: backup)
+            fputs("[Config] 配置损坏（\(reason)）→ 已备份为 \(backup.lastPathComponent)，"
+                  + "本次以默认配置启动。原配置未被删除，可人工恢复。\n", stderr)
+        } catch {
+            fputs("[Config] 配置损坏（\(reason)）且备份失败：\(error)。"
+                  + "为安全起见保留原文件不动。\n", stderr)
+        }
     }
 
     /// **v11 补齐**：上下边缘横向滑动 → 媒体进度（seek）。为旧配置补齐：
@@ -277,12 +310,29 @@ public enum ConfigStore {
         return c
     }
 
-    /// 保存配置
-    public static func save(_ config: AppConfig) {
+    /// 保存配置。
+    ///
+    /// **不得静默吞掉编码错误**：`JSONEncoder` 对 NaN/±Inf 会抛错（用户可在节点参数里输入
+    /// "nan"），原实现 `try?` 一吞，后续每次保存都静默失效而 UI 看起来正常。现在把失败
+    /// 打到 stderr，返回是否成功，供调用方感知。
+    @discardableResult
+    public static func save(_ config: AppConfig) -> Bool {
         // 测试进程未重定向 → 拒绝写盘（否则会把测试默认配置写进用户真实 config.json）
-        guard mayPersist else { return }
-        guard let data = try? JSONEncoder().encode(config) else { return }
-        try? data.write(to: configURL, options: .atomic)
+        guard mayPersist else { return false }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(config)
+        } catch {
+            fputs("[Config] 保存失败（编码错误，可能是 NaN/Inf 参数）：\(error)\n", stderr)
+            return false
+        }
+        do {
+            try data.write(to: configURL, options: .atomic)
+            return true
+        } catch {
+            fputs("[Config] 保存失败（写入错误）：\(error)\n", stderr)
+            return false
+        }
     }
 
     // MARK: - 迁移
@@ -356,8 +406,17 @@ public enum ConfigStore {
 
     // MARK: - 用户默认配置
     public static func saveAsDefault(_ config: AppConfig) {
-        guard let data = try? JSONEncoder().encode(config) else { return }
-        try? data.write(to: userDefaultURL, options: .atomic)
+        // 与 save 同源防护：测试进程未重定向时拒绝写盘，否则会污染用户真实 default.json
+        guard mayPersist else { return }
+        guard let data = try? JSONEncoder().encode(config) else {
+            fputs("[Config] 保存默认配置失败（编码错误）\n", stderr)
+            return
+        }
+        do {
+            try data.write(to: userDefaultURL, options: .atomic)
+        } catch {
+            fputs("[Config] 保存默认配置失败（写入错误）：\(error)\n", stderr)
+        }
     }
 
     public static func loadDefault() -> AppConfig {
