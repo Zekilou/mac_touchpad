@@ -15,6 +15,18 @@ public enum ConfigStore {
     /// 测试注入：重定向 configURL（避免单测读写真实用户配置）
     static var overrideConfigURL: URL?
 
+    /// 是否运行在测试进程里（XCTest 会注入该环境变量）。
+    /// 根因防护：`GestureEngine.config` 的 setter 会无条件 `ConfigStore.save`，
+    /// 而单测里构造的 `AppConfig()` 用的是**全新随机 UUID**——一旦某个测试忘了设置
+    /// `overrideConfigURL`，就会把"测试用默认配置"直接写进**用户的真实 config.json**，
+    /// 把用户的手势/区域/事件 id 全部换掉（且旧 id 不可恢复）。
+    /// 故在此兜底：测试进程内绝不允许写真实路径，只能写显式重定向的临时文件。
+    static var isRunningUnderTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+
     /// 用户当前配置
     public static var configURL: URL {
         if let override = overrideConfigURL { return override }
@@ -22,6 +34,11 @@ public enum ConfigStore {
             .appendingPathComponent("TouchpadGestures", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("config.json")
+    }
+
+    /// 是否允许写盘：测试进程必须显式重定向，否则拒绝（防止污染用户真实配置）
+    private static var mayPersist: Bool {
+        overrideConfigURL != nil || !isRunningUnderTests
     }
 
     /// 用户自定义默认配置
@@ -173,6 +190,7 @@ public enum ConfigStore {
                 fputs("[Config] 补齐 Force 手势：\(spec.name)\n", stderr)
                 didChange = true
             }
+            didChange = ensureEdgeSeekGestures(&cfg) || didChange
             if didChange { save(cfg) }
             return cfg
         }
@@ -189,6 +207,52 @@ public enum ConfigStore {
             return migrated
         }
         return AppConfig()
+    }
+
+    /// **v11 补齐**：上下边缘横向滑动 → 媒体进度（seek）。为旧配置补齐：
+    /// seek 事件、上/下边缘区域、上边缘手势（启用）、下边缘手势（配置但不启用）。
+    /// 已有同名手势/区域/ActionType 时不重复添加。返回是否发生变更。
+    @discardableResult
+    static func ensureEdgeSeekGestures(_ cfg: inout AppConfig) -> Bool {
+        // 两个手势都已存在 → 无需补齐
+        guard !(cfg.gestures.contains { $0.name == "上边缘" }
+                && cfg.gestures.contains { $0.name == "下边缘" }) else { return false }
+        let regionNames = ["上边缘", "下边缘"]
+        var changed = false
+        // 1) seek 事件
+        var seek = cfg.events.first { $0.actionType == .seek }
+        if seek == nil {
+            seek = EventConfig.defaultSeek
+            cfg.events.append(seek!)
+            fputs("[Config] 补齐媒体进度事件\n", stderr)
+            changed = true
+        }
+        // 2) 上/下边缘区域
+        var regions: [String: RegionConfig] = [:]
+        for name in regionNames {
+            if let existing = cfg.regions.first(where: { $0.name == name }) {
+                regions[name] = existing
+                continue
+            }
+            let region = (name == "上边缘") ? RegionConfig.defaultTop : RegionConfig.defaultBottom
+            cfg.regions.append(region)
+            regions[name] = region
+            fputs("[Config] 补齐区域：\(name)\n", stderr)
+            changed = true
+        }
+        // 3) 手势：上边缘启用、下边缘不启用
+        let specs: [(name: String, region: String, enabled: Bool)] = [
+            ("上边缘", "上边缘", true), ("下边缘", "下边缘", false),
+        ]
+        for spec in specs where !cfg.gestures.contains(where: { $0.name == spec.name }) {
+            guard let region = regions[spec.region], let event = seek else { continue }
+            cfg.gestures.append(GestureConfig(name: spec.name, regionID: region.id, eventID: event.id,
+                                              pipeline: LegacyPipelineConfig(signalSource: .normX),
+                                              event: event, enabled: spec.enabled))
+            fputs("[Config] 补齐边缘手势：\(spec.name)\n", stderr)
+            changed = true
+        }
+        return changed
     }
 
     /// **诊断最简模式**（隔离验证 tick 底层链路）：每个手势的图重建为最简图——
@@ -215,6 +279,8 @@ public enum ConfigStore {
 
     /// 保存配置
     public static func save(_ config: AppConfig) {
+        // 测试进程未重定向 → 拒绝写盘（否则会把测试默认配置写进用户真实 config.json）
+        guard mayPersist else { return }
         guard let data = try? JSONEncoder().encode(config) else { return }
         try? data.write(to: configURL, options: .atomic)
     }

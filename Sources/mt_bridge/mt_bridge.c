@@ -103,6 +103,16 @@ static void restore_stdfd(int save_out, int save_err)
     if (save_err >= 0) { dup2(save_err, STDERR_FILENO); close(save_err); }
 }
 
+/* 自定义波形通路（可编程触觉）。
+ * 这两个符号属于「宿主自定义波形」能力：MTActuationCreateFromDictionary 把参数字典
+ * 编译成波形对象，MTActuationActuate 再经由 waveformID=83（宿主自定义槽）下发。
+ * 以软解析方式获取——缺失时 mt_actuate_custom 返回 -1，不影响预设波形通路。 */
+typedef CFTypeRef (*fn_MTActuationCreateFromDictionary)(CFDictionaryRef, void *);
+typedef int       (*fn_MTActuationActuate)(CFTypeRef, void *, void *);
+
+static fn_MTActuationCreateFromDictionary pMTActuationCreateFromDictionary = NULL;
+static fn_MTActuationActuate             pMTActuationActuate             = NULL;
+
 /* ---------------------------------------------------------------------------
  * 生命周期：mt_init / mt_shutdown
  * ------------------------------------------------------------------------- */
@@ -137,6 +147,12 @@ int mt_init(void)
     RESOLVE(MTDeviceStop,                  pMTDeviceStop);
 #undef RESOLVE
 
+    /* 软解析：自定义波形为可选增强能力，缺失不阻断基础触觉 */
+    pMTActuationCreateFromDictionary =
+        (fn_MTActuationCreateFromDictionary)dlsym(g_framework, "MTActuationCreateFromDictionary");
+    pMTActuationActuate =
+        (fn_MTActuationActuate)dlsym(g_framework, "MTActuationActuate");
+
     g_initialized = 1;
     return 0;
 
@@ -156,6 +172,8 @@ void mt_shutdown(void)
     pMTRegisterContactFrameCallback = NULL;
     pMTDeviceStart                 = NULL;
     pMTDeviceStop                  = NULL;
+    pMTActuationCreateFromDictionary = NULL;
+    pMTActuationActuate              = NULL;
     if (g_framework) {
         dlclose(g_framework);
         g_framework = NULL;
@@ -366,6 +384,137 @@ int mt_actuate(uint64_t deviceID, int waveformID)
     (void)pMTActuatorClose(actuator);
     CFRelease(actuator);
     return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * 自定义波形（可编程触觉）
+ *
+ * 与 mt_actuate 的区别：mt_actuate 只能播 Apple 出厂预设（waveformID 1~64），
+ * 本函数按调用方给出的物理参数现场编译一个波形并播放——走的是框架内部的
+ * 「宿主自定义波形」槽位（实测为 waveformID 83），与预设波形互不干扰。
+ *
+ * 参数结构严格对齐 Apple 产线 actuation 定义（BaseWaveform + Tones +
+ * Base/ToneMultipliers），证据见 docs/research/自定义波形可行性.md。
+ * ------------------------------------------------------------------------- */
+static CFNumberRef mt_num_int(int v)
+{
+    return CFNumberCreate(NULL, kCFNumberIntType, &v);
+}
+
+static CFNumberRef mt_num_double(double v)
+{
+    return CFNumberCreate(NULL, kCFNumberDoubleType, &v);
+}
+
+int mt_actuate_custom(uint64_t deviceID, mt_waveform_t wf)
+{
+    /* -1 = 能力不可用（框架未初始化 / 私有符号缺失）→ 调用方应回退预设波形 */
+    if (!g_initialized) return -1;
+    if (!pMTActuationCreateFromDictionary || !pMTActuationActuate) return -1;
+
+    int rc = -2;   /* -2 = 参数被拒 / 设备不可用（不触发回退，避免双震） */
+    CFTypeRef actuation = NULL;
+    void *actuator = NULL;
+    int opened = 0;
+
+    /* ---- BaseWaveform ---- */
+    CFStringRef envType = CFStringCreateWithCString(NULL, wf.envelope_type,
+                                                    kCFStringEncodingUTF8);
+    if (!envType) return -1;
+    CFNumberRef envDur = mt_num_int((int)wf.envelope_duration_ms);
+    CFNumberRef envAmp = mt_num_double(wf.envelope_amplitude);
+    const void *baseKeys[] = { CFSTR("Type"), CFSTR("DurationMS"), CFSTR("Amplitude") };
+    const void *baseVals[] = { envType, envDur, envAmp };
+    CFDictionaryRef base = CFDictionaryCreate(NULL, baseKeys, baseVals, 3,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+
+    /* ---- Tones[0] ---- */
+    CFStringRef toneType = CFStringCreateWithCString(NULL, wf.tone_type,
+                                                     kCFStringEncodingUTF8);
+    CFNumberRef toneFreq = mt_num_double(wf.tone_frequency_khz);
+    CFNumberRef toneAmp  = mt_num_double(wf.tone_amplitude);
+    CFNumberRef toneDur  = mt_num_int((int)wf.tone_duration_ms);
+    CFNumberRef toneDelay = mt_num_int((int)wf.tone_delay_ms);
+    CFDictionaryRef tone = NULL;
+    CFArrayRef tones = NULL;
+    if (toneType) {
+        const void *toneKeys[] = { CFSTR("Type"), CFSTR("FrequencykHz"),
+                                   CFSTR("Amplitude"), CFSTR("DurationMS"),
+                                   CFSTR("DelayMS") };
+        const void *toneVals[] = { toneType, toneFreq, toneAmp, toneDur, toneDelay };
+        tone = CFDictionaryCreate(NULL, toneKeys, toneVals, 5,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (tone) {
+            const void *oneTone[] = { tone };
+            tones = CFArrayCreate(NULL, oneTone, 1, &kCFTypeArrayCallBacks);
+        }
+    }
+
+    /* ---- 按压力度乘法器 ---- */
+    CFNumberRef eL = mt_num_double(wf.envelope_light);
+    CFNumberRef eM = mt_num_double(wf.envelope_medium);
+    CFNumberRef eF = mt_num_double(wf.envelope_firm);
+    const void *mulKeys[] = { CFSTR("Light"), CFSTR("Medium"), CFSTR("Firm") };
+    const void *envMulVals[] = { eL, eM, eF };
+    CFDictionaryRef envMul = CFDictionaryCreate(NULL, mulKeys, envMulVals, 3,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+
+    CFNumberRef tL = mt_num_double(wf.tone_light);
+    CFNumberRef tM = mt_num_double(wf.tone_medium);
+    CFNumberRef tF = mt_num_double(wf.tone_firm);
+    const void *toneMulVals[] = { tL, tM, tF };
+    CFDictionaryRef toneMul = CFDictionaryCreate(NULL, mulKeys, toneMulVals, 3,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+
+    /* ---- 顶层字典 ---- */
+    if (base && tones && envMul && toneMul) {
+        const void *topKeys[] = { CFSTR("BaseWaveform"), CFSTR("Tones"),
+                                  CFSTR("BaseMultipliers"), CFSTR("ToneMultipliers") };
+        const void *topVals[] = { base, tones, envMul, toneMul };
+        CFDictionaryRef dict = CFDictionaryCreate(NULL, topKeys, topVals, 4,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (dict) {
+            /* 编译波形（无 BaseWaveform 键时框架返回 NULL） */
+            actuation = pMTActuationCreateFromDictionary(dict, NULL);
+            CFRelease(dict);
+        }
+    }
+
+    /* ---- 播放 ---- */
+    if (actuation) {
+        actuator = pMTActuatorCreateFromDeviceID(deviceID);
+        if (actuator && pMTActuatorOpen(actuator, 0) == 0) {
+            opened = 1;
+            rc = pMTActuationActuate(actuation, actuator, NULL);
+        }
+    }
+
+    /* ---- 清理（严格对称，避免每次震动泄漏） ---- */
+    if (opened) {
+        (void)pMTActuatorClose(actuator);
+    }
+    if (actuator) CFRelease(actuator);
+    if (actuation) CFRelease(actuation);
+    if (base) CFRelease(base);
+    if (tone) CFRelease(tone);
+    if (tones) CFRelease(tones);
+    if (envMul) CFRelease(envMul);
+    if (toneMul) CFRelease(toneMul);
+    if (envType) CFRelease(envType);
+    if (toneType) CFRelease(toneType);
+    if (envDur) CFRelease(envDur);
+    if (envAmp) CFRelease(envAmp);
+    if (toneFreq) CFRelease(toneFreq);
+    if (toneAmp) CFRelease(toneAmp);
+    if (toneDur) CFRelease(toneDur);
+    if (toneDelay) CFRelease(toneDelay);
+    if (eL) CFRelease(eL);
+    if (eM) CFRelease(eM);
+    if (eF) CFRelease(eF);
+    if (tL) CFRelease(tL);
+    if (tM) CFRelease(tM);
+    if (tF) CFRelease(tF);
+    return rc;
 }
 
 /* ---------------------------------------------------------------------------

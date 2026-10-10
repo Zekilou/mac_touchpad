@@ -13,8 +13,9 @@ final class EngineEffects: TimelineEffects {
     /// 当前 holding 手势的事件引用（consume 的 mutating 状态跨帧保留）
     var eventBox: EventBox?
 
-    func triggerHaptic(waveform: Int32, count: Int, intervalUs: Int32, async: Bool) {
-        engine?.triggerHaptic(waveform: waveform, count: count, intervalUs: intervalUs, async: async)
+    func triggerHaptic(waveform: Int32, customWaveformID: UUID?, count: Int, intervalUs: Int32, async: Bool) {
+        engine?.triggerHaptic(waveform: waveform, customWaveformID: customWaveformID,
+                              count: count, intervalUs: intervalUs, async: async)
     }
 
     func consume(_ output: GestureOutput) -> BoundaryResult {

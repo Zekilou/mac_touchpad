@@ -37,12 +37,14 @@ struct GestureTabView: View {
                             set: { config.gestures[idx].enabled = $0 }
                         ),
                         events: config.events,
-                        regions: config.regions)
+                        regions: config.regions,
+                        customWaveforms: config.customWaveforms)
                 } else {
                     TimelineGraphView(timeline: Binding(
                         get: { config.gestures[idx].timeline },
                         set: { config.gestures[idx].timeline = $0 }
                     ), events: config.events, regions: config.regions,
+                    customWaveforms: config.customWaveforms,
                     enabled: Binding(
                         get: { config.gestures[idx].enabled },
                         set: { config.gestures[idx].enabled = $0 }

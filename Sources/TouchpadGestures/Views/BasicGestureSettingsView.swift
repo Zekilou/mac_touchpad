@@ -10,6 +10,8 @@ struct BasicGestureSettingsView: View {
     @Binding var enabled: Bool
     let events: [EventConfig]
     let regions: [RegionConfig]
+    /// 自定义波形库（触觉卡片选择自定义波形用）
+    var customWaveforms: [CustomWaveform] = []
 
     var body: some View {
         ScrollView {
@@ -225,7 +227,8 @@ struct BasicGestureSettingsView: View {
         gesture.timeline.nodes.first { $0.type == .haptic && $0.title == title }?.params
     }
 
-    /// 单个震动时机：波形 + 次数 + 间隔（读根图 haptic 节点；节点不存在则跳过该行）
+    /// 单个震动时机：波形（预设/自定义 + 缩略预览）+ 次数 + 间隔
+    /// （读根图 haptic 节点；节点不存在则跳过该行）
     private func hapticRow(label: String, title: String) -> some View {
         guard currentHaptic(title) != nil else {
             return AnyView(EmptyView())
@@ -235,12 +238,17 @@ struct BasicGestureSettingsView: View {
                 Text(label).font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Text(L10n.tr("波形", "Waveform")).frame(width: 150, alignment: .leading)
-                    Stepper(value: Binding(
-                        get: { Int(currentHaptic(title)?.waveform ?? 1) },
-                        set: { gesture.setHaptic(title, waveform: Int32($0)) }
-                    ), in: 1...16) {
-                        Text("\(currentHaptic(title)?.waveform ?? 1)").monospacedDigit()
-                    }
+                    WaveformPickerRow(
+                        presetID: Binding(
+                            get: { currentHaptic(title)?.waveform ?? 1 },
+                            set: { gesture.setHaptic(title, waveform: $0) }
+                        ),
+                        customWaveformID: Binding(
+                            get: { currentHaptic(title)?.customWaveformID },
+                            set: { gesture.setHapticCustomWaveform(title, id: $0) }
+                        ),
+                        customWaveforms: customWaveforms,
+                        compact: true)
                     Spacer()
                 }
                 HStack {

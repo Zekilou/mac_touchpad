@@ -159,7 +159,10 @@ public struct FrameContext {
 /// 纯计算节点不依赖此协议 → 可独立 dry-run 测试
 public protocol TimelineEffects {
     /// 触觉反馈（HapticNode）
-    func triggerHaptic(waveform: Int32, count: Int, intervalUs: Int32, async: Bool)
+    /// - Parameters:
+    ///   - waveform: 预设波形 ID（customWaveformID 为 nil 时使用）
+    ///   - customWaveformID: 自定义波形引用（非 nil 时优先；由引擎解析为 WaveformSpec）
+    func triggerHaptic(waveform: Int32, customWaveformID: UUID?, count: Int, intervalUs: Int32, async: Bool)
     /// 消费量化输出，执行系统调节（ConsumeNode）
     func consume(_ output: GestureOutput) -> BoundaryResult
     /// 唤起系统 HUD（HUDNode）
@@ -177,7 +180,7 @@ public protocol TimelineEffects {
 /// 副作用抑制包装：全部 no-op（模块帧末 writePass 重跑时用，只收集写请求不重复派发）
 public struct SilentEffects: TimelineEffects {
     public init() {}
-    public func triggerHaptic(waveform: Int32, count: Int, intervalUs: Int32, async: Bool) {}
+    public func triggerHaptic(waveform: Int32, customWaveformID: UUID?, count: Int, intervalUs: Int32, async: Bool) {}
     public func consume(_ output: GestureOutput) -> BoundaryResult { .normal }
     public func showHUD(direction: Int) {}
     public func lockMouse() {}

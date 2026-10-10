@@ -5,6 +5,8 @@ import Foundation
 public enum ActionType: String, Codable, CaseIterable {
     case volume
     case brightness
+    /// 媒体进度：通过 AX API 操作焦点 app 的 AXSlider（带方向键回退）
+    case seek
 
     /// 中文 + 英文展示名（描述模拟的是什么系统按键/功能）
     public var displayName: String {
@@ -13,6 +15,8 @@ public enum ActionType: String, Codable, CaseIterable {
             return L10n.tr("系统音量键（F10/F11/F12）", "System Volume Keys (F10/F11/F12)")
         case .brightness:
             return L10n.tr("系统亮度键（F1/F2）", "System Brightness Keys (F1/F2)")
+        case .seek:
+            return L10n.tr("媒体进度（AX API + 方向键回退）", "Media Seek (AX API + Arrow Fallback)")
         }
     }
 
@@ -21,6 +25,7 @@ public enum ActionType: String, Codable, CaseIterable {
         switch self {
         case .volume: return L10n.tr("音量", "Volume")
         case .brightness: return L10n.tr("亮度", "Brightness")
+        case .seek: return L10n.tr("进度", "Seek")
         }
     }
 }
@@ -184,6 +189,17 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
         executionMethod: .mediaKey
     )
 
+    /// 默认媒体进度事件：direct 模式（AX API 读写 AXSlider，找不到时回退方向键）
+    /// step = 0.05（每 tick 移动 5% 总时长）；不参与边界检测（进度由 app 自己 clamp）
+    public static let defaultSeek = EventConfig(
+        name: L10n.tr("媒体进度", "Media Seek"),
+        actionType: .seek,
+        step: 0.05,
+        boundaryThreshold: 0.001,
+        directionRule: .positiveIncrease,   // 右滑 = 快进
+        executionMethod: .direct            // AX API（带方向键回退）
+    )
+
     // MARK: - 读值
 
     /// 读取当前系统值（0~1）
@@ -191,6 +207,7 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
         switch actionType {
         case .volume: return SystemControl.getVolume()
         case .brightness: return SystemControl.getBrightness()
+        case .seek: return SystemControl.getSeekPosition() ?? 0
         }
     }
 
@@ -277,15 +294,16 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
                     if targetDir > 0 { SystemControl.volumeUp() } else { SystemControl.volumeDown() }
                 case .brightness:
                     if targetDir > 0 { SystemControl.brightnessUp() } else { SystemControl.brightnessDown() }
+                case .seek:
+                    if targetDir > 0 { SystemControl.seekForward() } else { SystemControl.seekBackward() }
                 }
             }
-            // trackedValue 推进：系统媒体键真实步长 1/16（非配置 step——v10.4 漂移教训是误用配置 step）。
-            // 引擎 boundarySide 方向感知边界分流需要"当前值"判定朝外/朝内滑动（到边界触发边界震动）；
-            // 不推进则 boundarySide 冻结在进入 holding 时的值 → 滑动到边界永远无边界反馈。
-            // 零 IOKit：首次惰性读一次（引擎进入 holding 时已读），此后纯数学推进（clamp [0,1]）
-            if trackedValue == nil { trackedValue = currentValue() }
-            let dv = Float(targetDir) * (1.0 / 16.0) * Float(n)
-            trackedValue = max(0.0, min(1.0, trackedValue! + dv))
+            // trackedValue 推进（seek 无系统值可追踪，跳过）
+            if actionType != .seek {
+                if trackedValue == nil { trackedValue = currentValue() }
+                let dv = Float(targetDir) * (1.0 / 16.0) * Float(n)
+                trackedValue = max(0.0, min(1.0, trackedValue! + dv))
+            }
             return .normal
         case .direct:
             // direct 需要当前值精确加减（读系统值不可避免）
@@ -294,6 +312,17 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
             switch actionType {
             case .volume:      SystemControl.setVolume(target)
             case .brightness:  SystemControl.setBrightness(target)
+            case .seek:
+                // AX API 写入 AXSlider；找不到时回退方向键
+                if !SystemControl.setSeekPosition(target) {
+                    if targetDir > 0 { SystemControl.seekForward() }
+                    else { SystemControl.seekBackward() }
+                }
+            }
+            // seek：信任写入值（避免每 tick 遍历 AX 树），无边界检测
+            if actionType == .seek {
+                trackedValue = target
+                return .normal
             }
             let after = currentValue()
             trackedValue = after
@@ -315,18 +344,22 @@ public struct EventConfig: Codable, Identifiable, Equatable, Hashable {
             switch actionType {
             case .volume: SystemControl.volumeUp()
             case .brightness: SystemControl.brightnessUp()
+            case .seek: break   // seek 无 HUD 边界唤起
             }
         } else if value <= boundaryThreshold {
             // 在下边界，发送「减小」的媒体键
             switch actionType {
             case .volume: SystemControl.volumeDown()
             case .brightness: SystemControl.brightnessDown()
+            case .seek: break
             }
         }
     }
 
     /// 进入 holding 时如果当前值已在边界，立即发一次 HUD（值不变）
     public mutating func postBoundaryKeyOnEnterIfNeeded() {
+        // seek 无系统 HUD，且读进度需遍历 AX 树（~10-50ms）——进入时不做
+        guard actionType != .seek else { return }
         guard isAtAnyBoundary() else { return }
         postBoundaryKeyIfNeeded()
     }

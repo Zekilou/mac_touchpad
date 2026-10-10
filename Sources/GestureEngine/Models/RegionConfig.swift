@@ -31,4 +31,14 @@ public struct RegionConfig: Codable, Identifiable, Equatable, Hashable {
     /// 默认右边缘区域
     public static let defaultRight = RegionConfig(
         name: "右边缘", xMin: 0.8, xMax: 1, yMin: 0, yMax: 1)
+
+    /// 默认上边缘区域（norm_y 0 = 触控板顶部）
+    /// x 限中段 0.2~0.8：与左右边缘（x 0~0.2 / 0.8~1，全高）四角不重叠，
+    /// 避免同一次触摸同时落入两个手势区域（会同时调两个事件）
+    public static let defaultTop = RegionConfig(
+        name: "上边缘", xMin: 0.2, xMax: 0.8, yMin: 0, yMax: 0.2)
+
+    /// 默认下边缘区域（norm_y 1 = 触控板底部），x 限中段原因同上
+    public static let defaultBottom = RegionConfig(
+        name: "下边缘", xMin: 0.2, xMax: 0.8, yMin: 0.8, yMax: 1)
 }

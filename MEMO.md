@@ -1,5 +1,173 @@
 # 项目备忘录
 
+## 功耗优化：触摸结束后引擎永久 120Hz 满耗的根因修复（2026-10-10）
+
+**现象**：运行中的 debug 实例空载常驻 **33–52% CPU**（`top -l 8 -s 1` 连续 8 秒均 >33%），
+`sample` 火焰图 100% 落在 `com.touchpad.engine.tick` 线程的 `processTick → GraphEvaluator.evaluate`
+（整图求值），即**空载跳帧优化完全失效**。而进程内单元测试里同样的图空载只有 ~0.5%。
+
+**根因（两个叠加缺陷）**：
+
+1. **冻结快照把状态机永久钉在非 idle（主因）**。MT 回调在手指离开后**彻底停止**，
+   `latestTouches` 于是**永久冻结在最后一帧**——而真实日志证明该帧常含 `state=6(tap)` /
+   `state=4(touch)` / `state=1(start)` 的**残留活动手指**（活动簇收尾帧分布：`present=true
+   touching=false n=2` 20 次、`present=false` 18 次、`present=true n=1` 12 次）。
+   旧 `canSkipIdleEvaluation` **只看内容不看时间**，于是判定永假 → finger 节点认为"还有手指"
+   → 识别状态机卡在 phase 3/4/5 回不到 0 → **120Hz 整图求值永不停止且不自愈**
+   （用户唯一解法是重启 app）。进程内测试没复现，是因为测试**没有模拟"回调停止后快照冻结"**。
+
+2. **唤醒频率未被省电收敛**。即便跳帧生效，120Hz 定时器仍在空载时持续唤醒 CPU。
+
+**修复**（`GestureEngine.swift`）：
+
+- `tick()` 增加**快照陈旧判定**：超过阈值无新回调 → 把该帧当**空帧**喂图。
+  阈值分两档：非 holding 用 `staleTouchInterval = 0.2s`（与 finger 节点 `staleEmpty` 同源同值，
+  两处对"还有没有手指"必须给出一致结论）；**holding 期间放宽到 `holdingStaleInterval = 1.0s`**
+  ——这是为保住 **v10.11 的核心修复**：MT 滑动中有采样间歇（实测 holding 期间回调间隔上限仅 ~87ms），
+  若按 200ms 判陈旧会在滑动中误判抬起 → 提前退出 holding（用户核心痛点）。
+  真实日志验证：holding 窗口内 323 个回调间隔**最大 87ms**，1.0s 留了 >10× 余量。
+- `pump()` 双路径：确认空载后进入**慢速时钟（20Hz）**并按真实墙钟整步推进 `simTime`
+  （不补跑 1/120 细分步，无追赶螺旋）；`onTouchFrame` 直接 pump 并置 `pendingTouch`
+  → 触摸**立刻**恢复全速（响应延迟不受省电影响）；累积不足一步时按真实 delta 推进，
+  保证 `now` 严格递增、时间类节点（保持 0.2s / 间隔 0.3s）不被省电带快。
+- 诊断辅助：`idleSkipDiagnosis()` / `debugPhases()` / `isClockSlowed`，
+  均经 `syncOnTickQueue`（`DispatchSpecificKey` 判自身队列）读取，既避免与 tick 竞争读到半更新状态，
+  也避免从 tickQueue 内调用时 `sync` 自锁死。
+- `stop()` 复位 `idleSlowed/pendingTouch/tickAccum/lastWall`。
+- `setClockSlowed` 用 `.now() + interval` 作 deadline：它由定时器自己的 handler 调用，
+  用 `.now()` 会让定时器立刻再到期，多一次无效唤醒。
+
+**验证**（`swift build --build-tests` 0 error；新增 `IdlePowerTests.swift` 6 项回归）：
+进程内实测各收尾形态（state=6/4/1/7、双指残留、空帧）在 MT 静默后空载均回落到 **~0.2%**
+（修复前同场景 **~40%**）；手指持续接触期间保持全速、触摸能立刻脱离慢速；
+holding 期间 400ms 采样间歇后 phase 仍为 4（v10.11 不回归）。
+
+**顺带修掉一个数据安全问题（重要）**：`GestureEngine.config` 的 setter 会无条件 `ConfigStore.save`，
+而 `CustomWaveformTests.testWaveformParamEditTakesEffectImmediately` 构造的 `AppConfig()` 用的是
+**全新随机 UUID** 却没重定向 `overrideConfigURL` → 每次跑测试都会把"测试用默认配置"写进
+**用户真实的 config.json**，把手势/区域/事件 id 全部换掉（本次排查中发现用户配置已因此被覆盖过）。
+修复：① 该测试补 `overrideConfigURL`；② `ConfigStore` 增加兜底 `mayPersist`
+——测试进程（`XCTestConfigurationFilePath`/`XCTestBundlePath`/`XCTestCase` 任一存在）
+未显式重定向时**拒绝写盘**，从机制上杜绝再次污染。已用「跑该测试前后 config.json 哈希不变」验证。
+
+**注意**：`.build` 的 SwiftPM 锁是**全仓库共享**的，另一个会话正在跑 `swift test` 时本会话
+`swift build` 会一直等待；本次用 `--scratch-path /tmp/tpg_scratch` 绕开。
+
+**待真机复测**：单击/双击/holding/seek 全手势，确认省电改动对边界时序
+（点按后 `gapTimeout` 倒计时、上抬 100ms 判定、cooldown）无影响。
+
+## 自定义波形续查：「count 不实时生效」的定位与三个缓存缺陷（2026-10-10，220 tests 通过）
+
+用户追加反馈：「count 参数根本就不实时起作用，感觉还有很多也是」，且限定场景为**「基础设置」页改、不生效**。
+
+### 先纠正上一轮的不完整结论
+
+上一轮把「整图重建冲掉波形绑定」当成了"改了不生效"的根因。本轮用**用户真实 config.json** 跑完整 `ConfigStore.load()` 做前后快照对比，结果：
+
+```
+BEFORE: 右侧/刻度震动  wf=5 count=2 intervalUs=133171
+AFTER:  右侧/刻度震动  wf=5 count=2 intervalUs=133171   ← 逐字段一致，未被改写
+```
+
+**落盘层与迁移层是干净的**——`count`/`waveform` 正常保留、正常落盘。故上一轮结论只解释了"自定义波形绑定丢失"，**不解释 count 不生效**。教训：**升级函数有没有改数据，要用真实配置跑一遍 load 做前后 diff 来判定，不能只读代码推断触发条件**。
+
+### 本轮确认的缺陷
+
+1. **模块子图 evaluator 缓存永不失效**（`GraphEvaluator.ModuleEvaluatorCache`）：仅以 `nodeID` 为 key，子图内容变化后仍返回旧 evaluator。修复：缓存项增子图快照，精确相等才复用。（注：本用户配置的 haptic 节点在**根图**，此条属防御性修复，非本次现象主因——已如实标注，不冒充根因。）
+
+2. **UI 与引擎的 intervalUs 默认值不一致**（`BasicGestureSettingsView` vs `NodeExecutors`）：
+   - UI `grep`：`currentHaptic(title)?.intervalUs ?? 50000` → nil 时**显示 50ms**
+   - 引擎：`intervalUs: p.intervalUs ?? 0` → nil 时**实际 0ms**
+   - 播放循环：`if i < n - 1 && us > 0 { usleep(us) }` → us=0 **不间隔，背靠背连发**
+   后果：`count>1` 且 `intervalUs=0` 时多次触发无间隔，马达合并为一次触感 → **用户调 count 手感不变**，且 UI 显示值与执行值语义不一致。这是「count 不生效」体感最直接的来源。
+
+3. **运行版本核对**：用 `nm` 确认用户实际运行的 Xcode DerivedData 产物已含修复符号（`rebuildTimelinePreservingWaveforms`），排除"跑的是旧版本"。教训：**排查"改了不生效"先确认进程加载的到底是哪个二进制**（`ps` + `lsof`/`nm`），本仓库存在 Xcode DerivedData 与 `dist/` 两处产物，极易混淆。
+
+### 排查方法（可复用）
+
+- **参数消费点审计**：脚本比对 `NodeParams` 全部 54 字段在引擎侧 vs UI 侧的引用数，筛出"UI 可编辑但引擎从不读取"的字段（本轮结果：无死字段，`count` 引擎侧 95 处引用，说明链路通、问题在运行时/物理层）。
+- **真实配置回归**：把用户 `config.json` 复制到临时路径，`ConfigStore.overrideConfigURL` 指向它跑 load，前后 diff 关键参数——可一次排除整条持久化/迁移链路。
+- 诊断用测试文件用完即删，避免污染测试套件。
+
+### 验证
+
+220 tests 全绿。真机 LLDB 断点确认自定义波形走 ID 83 专用槽、四组参数下发缓冲各异、30 次连发无泄漏。
+
+## 自定义波形：可视化编辑 + 全选择处预览（2026-10-10，213 tests 通过）
+
+**需求**：① 波形栏左侧 + 可视化编辑波形；② 所有选择波形的地方旁边有缩略预览图。
+
+**落地**：
+- **模型** `Models/CustomWaveform.swift`：`WaveformSpec`（包络 + 音调 + 按压力度乘法器，`dictionary()` 产出 Apple 产线同构字典）、`CustomWaveform`（id/name/spec）、`WaveformPresetCatalog`（预设 1~16 参数，源自 `MTActuatorGetProductionPlist` 导出的 134KB 定义表）、`WaveformPreview`（纯函数采样，可测试）。
+- **桥接** `mt_actuate_custom(deviceID, mt_waveform_t)`：按参数现场编译波形 → `MTActuationCreateFromDictionary` → `MTActuationActuate`（实测走宿主自定义槽 **waveformID 83**，与预设 1~64 互不干扰）。软解析两个私有符号，缺失返回 -1 由调用方回退预设（-2 = 参数/设备问题，不回退以免双震）。
+- **引擎**：`TimelineEffects.triggerHaptic` 增 `customWaveformID`；`GestureEngine.triggerHaptic` 按 id 从 **live config** 解析 spec；`previewWaveform` 供试听（不走 30ms 节流）。
+- **UI**：新增一级导航「波形」= 左波形栏（预设/自定义各带缩略图 + 新建）+ 右可视化编辑器（`InteractiveWaveformCanvas` 可**拖拽控制点**改包络/音调，另有滑块精调、按压力度档位预览、试听、另存为自定义、删除解绑）。`WaveformPickerRow` 统一「预设/自定义 + 缩略图」，接入基础设置触觉卡片与画布节点参数面板。
+- **配置**：`AppConfig.customWaveforms`（自定义 Codable，旧文件缺键回退空数组）；`NodeParams.customWaveformID`（非 nil 优先于预设 waveform ID）。
+
+**用户反馈「改了波形参数但手感不变」→ 两个独立根因（均已修复 + 回归测试）**：
+
+1. **`upgradeForcePress` 误判导致整图重建冲掉绑定**（`GestureConfig`）：判定条件 `waveform != 3` 有两个误判来源——① 用户改用自定义波形时预设 ID 被忽略 → 恒真；② 用户**关闭**进入震动（节点删除）→ `nil != 3` 也真。结果每次 load 都判定"旧图"→ `TimelineMigrator` 整图重建 → `customWaveformID` 丢失（迁移器参数模型里没有该字段）→ 预览图变了但实际永远回退预设。修复：三条件同时成立才算旧图（节点存在 && 无自定义绑定 && 预设非 3）。**并加通用保护** `rebuildTimelinePreservingWaveforms`：快照/恢复 haptic 标题→波形 ID 绑定，**全部 5 处整图重建升级**统一走它。教训：**整图重建式迁移必须白名单式保留「迁移器不认识的新字段」，否则每次启动静默回滚用户编辑**。
+
+2. **执行器缓存从不失效 → 编辑图后仍跑旧图**（`GestureEngine`）：`GraphEvaluator` init 时**拷贝** timeline 并预计算入边索引（其注释明写"生命周期内不可变"），而 `runtimes` 按 `gesture.id` 缓存、**只在 stop() 清理**。用户在画布/波形页改波形引用、调参数、连连线后 id 未变 → 继续执行旧图。修复：`Runtime` 增 `graph: TimelineConfig`，`runtime(for:)` 用**精确相等**（非 hashValue，避免碰撞导致少数编辑静默失效）判断重建；重建时保留 `store` 与 `wasHolding`，避免清空 baseline/transform.last 导致手感跳变。教训：**以「实体 id」为 key 缓存派生自可变数据的对象时，必须同时保存其数据快照并做变更检测**——这是"界面变了但行为不变"这类幽灵 bug 的通用温床。
+
+**验证**：213 tests 全绿（新增 26）。真机 LLDB 断点抓 `MTActuatorSetWaveform` 确认四组不同参数下发的硬件缓冲各异（`amp 10→35` = byte1 `0a→23`；`freq 0.1/3.6kHz` = byte7 `ef/06`），且全部走 ID 83；30 次连发无泄漏。
+
+**已知限制**：预览曲线是参数近似（Apple Default 表中 ID 1/3/5、2/4 参数重复，真实差异来自固件与机型覆盖表）；采样缓冲是内部分压缩编码，只能做"包络+音调合成"，不能播放任意 PCM。
+
+## 空载跳帧优化：无触摸且全 idle 时跳过整图求值（2026-09-11，187 tests 通过，空载 CPU 25–28% → ~0.4%）
+
+**目标**：上一节模块缓存修复后空载仍 ~25–28%，进一步深挖「遗留」项——`processTick` 按 120Hz 对全部启用手势整图求值，与是否有触摸无关。
+
+**修复**（GestureEngine.swift）：
+1. `tick()` 增加空载快速路径：`canSkipIdleEvaluation(touches:)` 为真时直接 `associateMouse()` 后 return，不调用 `processTick`。
+2. `canSkipIdleEvaluation` 判定：**无原始活动手指**（`state != 0 && state != 7`）+ **所有已启用手势停在 idle**（`store["phase"]` 为 nil 或 0，且 `!wasHolding`）。
+3. **安全不变量**：任何待处理的「时间驱动转移」（`gapTimeout` 的 `firstTapUp→idle`、上抬 100ms 检测、`staleEmpty` 200ms 兜底）都必然对应 `phase != idle`，因此 idle 时跳帧不会漏掉这些转移；一旦相位离开 idle 立即恢复逐帧求值。
+4. `simTime` 仍在 `pump()` 中推进（与是否跳帧无关）→ `frame.now` 保持连续，恢复求值时不丢时间。
+5. 顺手把 `processTick` 末尾的鼠标锁定块抽成 `syncCursorLock()`，跳帧路径只需 `associateMouse()` 保证 residual 锁定被释放。
+
+**验证**：
+- `swift test` **187 全过**（状态机语义无回归）。
+- release 重打包、app 签名有效（`codesign -dv` 通过）。
+- 空载实测：`top -l 6 -s 1 -pid` = **0.0/0.3/0.4/0.4/0.4/0.4%**；`ps` 25s CPU 时间增量 0.13s（≈0.5%）。修复前同路径基线 25–28% → **约 50–80× 降幅**。
+- 残留 ~0.4% 主要是 120Hz `DispatchSourceTimer` 唤醒 + 空载判定的固定开销（非图求值）。
+
+**注意**：`scripts/build_app.sh` 在沙箱内执行会在 DMG 步骤失败（`/dev/disk5` 受限，hdiutil 需设备访问）；`.app` 已组装+签名成功，仅 DMG 需在沙箱外补跑。
+
+**待真机复测**：单击/双击/holding/seek 全部手势，确认跳帧在边界时序（点按后 `gapTimeout` 倒计时、上抬 100ms 判定、cooldown）下行为不变。
+
+
+## 模块子图 evaluator 每帧重建 → 空载 CPU 回归修复（2026-09-11，187 tests 通过）
+
+**现象**：新增 seek/上下边缘手势后，app 空载 CPU 飙到大盘 ~52–57%（`top`/活动监视器）。
+
+**定位**：`sample <PID> 3` 火焰图显示 `com.touchpad.engine.tick` 主热点在 `NodeExecutors.execute` 的 `.module` 分支——**每个 module 节点每帧都 `GraphEvaluator(timeline: sub)` 重新构造子图执行器**（3s 内 `GraphEvaluator.init` 被调 464 次），每次构造都做 `TimelineGraphValidator.topologicalOrder`（拓扑校验）+ `NodeConfig` 深拷贝（`initializeWithCopy for NodeConfig` / `_platform_memmove`）。
+
+**修复**（GraphEvaluator.swift + NodeExecutors.swift）：
+1. `GraphEvaluator.init` 预计算入/出边邻接索引 `incomingByNode`/`outgoingByNode` + `nodesByID`，替换每帧对 `timeline.edges` 的 O(E) `filter`（原调用 `Timeline.incomingEdges/outgoingEdges`）；`evaluate` 内不再每帧重建 `nodesByID`。
+2. 新增 `ModuleEvaluatorCache`（module 节点 UUID → 子图 `GraphEvaluator` 缓存），`GraphEvaluator` 持有实例并传入 `NodeExecutors.execute`（新增 `moduleCache` 参数）；`.module` 分支改为 `moduleCache?.evaluator(forNodeID:subgraph:) ?? GraphEvaluator(timeline: sub)`，首次构建后逐帧复用。
+
+**验证**：`swift test` **187 全过**（语义无回归）；release 重打包。修复后空载 CPU **~25–28%**（`top -l 8 -s 1`：27.3/28.2/26.9/28.1/26.1/24.6），修复前同路径基线 52%；tick 火焰图中 `GraphEvaluator.init` / `topologicalOrder` 计数归零。
+
+**遗留（既有设计，非本次回归）**：`GestureEngine.processTick` 按 120Hz 固定步长对**全部启用手势整图求值**（与是否有触摸无关），构成剩余 ~27% 空载开销主因。如需进一步降耗可考虑「无触摸且非 holding 时跳过图求值」，但需评估对含超时/时间类节点状态机的影响——**待定，未实施**。
+
+## 新增媒体进度事件（seek）+ 上下边缘手势（2026-09-11，187 tests 通过）
+
+用户要求：触控板上/下边缘横向滑动 → 控制**当前焦点 App 的媒体进度**（视频/音乐快进快退）；上边缘启用，下边缘先配置但不启用。
+
+- **可行性结论（已调研）**：`AXUIElement`（辅助功能 API）是 Apple 公开合法 API（非私有），Keyboard Maestro / axcli / Swift Wright 等商用+开源产品在用；对原生 AppKit/SwiftUI app（QuickTime/Music/Spotify）可靠，Electron/自绘渲染 app 可能找不到滑块 → 用**方向键回退**兜底。权限**不需要新申请**，与 CGEventTap 同属已有「辅助功能」TCC 类别。
+- 选择**相对映射**而非绝对：AX 写 AXSlider 的 AXValue（0~1 绝对比例）+ 找不到时发 ←/→（keyCode 123/124）相对步进。
+- **ActionType** 新增 `.seek`（displayName/shortName）；`EventConfig.defaultSeek`（step 0.05、boundaryThreshold 0.001、directionRule positiveIncrease=右滑快进、executionMethod .direct）。
+- **SystemControl** 新增：`findSlider`（递归 AX 树找 AXSlider，maxDepth 8 防深树卡死）+ `findSeekSlider`（按 frontmostApplication + 5s 缓存，避免每 tick 遍历 AX 树 ~10-50ms）+ `getSeekPosition() -> Float?` + `setSeekPosition(_:) -> Bool` + `seekForward()/seekBackward()`（CGEvent 方向键，复用 20ms 全局节流）；新增测试钩子 `mockSeekPosition`/`mockSetSeekOK`。
+- **EventConfig.consume**：mediaKey 分支加 `.seek`（发方向键，不做 trackedValue 推进）；direct 分支加 `.seek`（AX 写值成功即信任并 return .normal，**不做边界检测**——进度由 app 自己 clamp）；`postBoundaryKeyIfNeeded` 的 seek 分支为 no-op。
+- **RegionConfig** 新增 `defaultTop`（x 0.2~0.8, y 0~0.2）/ `defaultBottom`（x 0.2~0.8, y 0.8~1）。**x 限中段的原因**：左右边缘区域是全高（y 0~1），若上下边缘全宽则**四角形成面积重叠** → 同一次触摸会同时落入两个手势区域、同时调两个事件。注意：矩形平铺下相邻区域仍共享**边界线**（测度零，无法消除），测试断言的是「重叠面积为 0」而非「无共享边界点」。
+- **AppConfig.init()**：regions 加 top/bottom，events 加 seek，gestures 加「上边缘」（启用，`LegacyPipelineConfig(signalSource: .normX)` 横向信号）与「下边缘」（enabled: false 预留）。
+- **ConfigStore.ensureEdgeSeekGestures(&cfg)**：旧配置启动时补齐 seek 事件 + 上下边缘区域 + 两个手势（上启用/下不启用），已有同名不重复添加；在 `load()` 的 Force 补齐之后调用。
+- **EventTabView**：执行方式/步长说明文字对 seek 特化（原文案说「写 CoreAudio/IOKit 寄存器」对 seek 是错的）；seek 时隐藏「边界检测」卡片（无意义）。`postBoundaryKeyOnEnterIfNeeded` 对 seek 直接 return（无系统 HUD，且进入 holding 时不必遍历 AX 树）。
+- 测试：`testActionType_allCasesCount` 2 → 3 并补 seek 断言；新增 seek consume 正/反向、mock 读写钩子、defaultSeek 配置、默认区域 y 范围、默认区域**零重叠面积**、默认配置含上下边缘手势（上启用/下不启用 + normX）共 7 个。
+- 验证：`swift build --disable-sandbox -c release` 成功；`swift test` **187 全过**（原 180 + 7）。
+- 待真机验证：找 QuickTime/Safari(YouTube)/Spotify 播放中，上边缘横向滑动是否改变进度（找不到 AXSlider 会自动回退 ←/→）。
+- 已知局限：方向键回退对 Music.app 是「上一首/下一首」而非进度（app 行为差异，非 bug）；Electron/自绘渲染 app 无 AXSlider 时走回退。
+
 ## v2.0.3 发布（2026-09-02，commit af3933d）
 
 已发布 GitHub release `v2.0.3`：<https://github.com/Zekilou/mac_touchpad/releases/tag/v2.0.3>

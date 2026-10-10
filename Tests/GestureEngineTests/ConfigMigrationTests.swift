@@ -119,6 +119,21 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertEqual(original, decoded)
     }
 
+    /// 默认配置含上下边缘手势：上边缘启用（横向 normX → 媒体进度）、下边缘仅配置不启用
+    func testDefaultConfig_edgeSeekGestures() {
+        let cfg = AppConfig()
+        XCTAssertTrue(cfg.regions.contains { $0.name == "上边缘" })
+        XCTAssertTrue(cfg.regions.contains { $0.name == "下边缘" })
+        XCTAssertNotNil(cfg.events.first { $0.actionType == .seek }, "默认应含 seek 事件")
+        guard let top = cfg.gestures.first(where: { $0.name == "上边缘" }),
+              let bottom = cfg.gestures.first(where: { $0.name == "下边缘" }) else {
+            return XCTFail("缺少上/下边缘手势")
+        }
+        XCTAssertTrue(top.enabled, "上边缘默认启用")
+        XCTAssertFalse(bottom.enabled, "下边缘默认仅配置不启用")
+        XCTAssertEqual(top.tickSignalSource, .normX, "边缘手势为横向滑动信号")
+    }
+
     /// 真实 v2 config.json 走 load() 应触发 v2→v3 迁移（H1：v2 文件键集合与 AppConfig 重合，
     /// 曾因先 decode v3 被宽松成功 → gesture 空图 + version=2 写回，迁移分支不可达）
     func testV2JSONThroughLoad_TriggersMigration() throws {

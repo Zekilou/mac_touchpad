@@ -4,7 +4,7 @@ import GestureEngine
 // MARK: - Primary Tab
 
 enum PrimaryTab: String, CaseIterable, Identifiable, Hashable {
-    case gestures, events, regions, morphology, settings
+    case gestures, events, regions, morphology, waveforms, settings
 
     var id: String { rawValue }
 
@@ -14,6 +14,7 @@ enum PrimaryTab: String, CaseIterable, Identifiable, Hashable {
         case .events:   return L10n.tr("事件", "Events")
         case .regions:  return L10n.tr("区域", "Regions")
         case .morphology: return L10n.tr("形态识别", "Morphology")
+        case .waveforms:  return L10n.tr("波形", "Waveforms")
         case .settings: return L10n.tr("设置", "Settings")
         }
     }
@@ -24,6 +25,7 @@ enum PrimaryTab: String, CaseIterable, Identifiable, Hashable {
         case .events:   return "bolt.fill"
         case .regions:  return "rectangle.dashed"
         case .morphology: return "hand.point.up.left"
+        case .waveforms:  return "waveform"
         case .settings: return "gearshape"
         }
     }
@@ -86,9 +88,10 @@ struct ConfigView: View {
             DetailContent()
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
-                        // 设置类页（设置/形态识别）不显示增删改编辑菜单
+                        // 设置类页（设置/形态识别/波形）不显示增删改编辑菜单
                         if appDelegate.currentEditingTab != .settings
-                            && appDelegate.currentEditingTab != .morphology {
+                            && appDelegate.currentEditingTab != .morphology
+                            && appDelegate.currentEditingTab != .waveforms {
                             EditMenu(tab: appDelegate.currentEditingTab)
                         }
                     }
@@ -142,6 +145,7 @@ struct DetailContent: View {
             case .events:   EventsDetail()
             case .regions:  RegionsDetail()
             case .morphology: MorphologyDetail()
+            case .waveforms:  WaveformsDetail()
             case .settings: SettingsDetail()
             }
         }
@@ -218,6 +222,15 @@ struct RegionsDetail: View {
                 appDelegate.selectedRegionID = appDelegate.config.regions.first?.id
             }
         }
+    }
+}
+
+/// 波形（无二级 tab；波形库自身在左侧栏）
+struct WaveformsDetail: View {
+    @EnvironmentObject var appDelegate: AppDelegate
+
+    var body: some View {
+        WaveformsTabView(config: $appDelegate.config)
     }
 }
 

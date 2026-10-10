@@ -25,4 +25,33 @@ final class RegionConfigTests: XCTestCase {
         XCTAssertEqual(RegionConfig.defaultRight.xMin, 0.8)
         XCTAssertEqual(RegionConfig.defaultRight.xMax, 1)
     }
+
+    func testDefaultTopBottomRegions() {
+        let top = RegionConfig.defaultTop
+        let bottom = RegionConfig.defaultBottom
+        // norm_y 0 = 顶部
+        XCTAssertEqual(top.yMin, 0)
+        XCTAssertEqual(top.yMax, 0.2)
+        XCTAssertEqual(bottom.yMin, 0.8)
+        XCTAssertEqual(bottom.yMax, 1)
+    }
+
+    /// 默认四个区域两两**面积**不重叠：同一次触摸不能同时落入两个手势区域（会同时调两个事件）。
+    /// 相邻矩形共享边界线是不可避免的（测度零），这里只断言重叠面积为 0。
+    func testDefaultRegions_noOverlapArea() {
+        let defaults = [RegionConfig.defaultLeft, RegionConfig.defaultRight,
+                        RegionConfig.defaultTop, RegionConfig.defaultBottom]
+        func overlapArea(_ a: RegionConfig, _ b: RegionConfig) -> Float {
+            let dx = min(a.xMax, b.xMax) - max(a.xMin, b.xMin)
+            let dy = min(a.yMax, b.yMax) - max(a.yMin, b.yMin)
+            return (dx > 0 && dy > 0) ? dx * dy : 0
+        }
+        for i in defaults.indices {
+            for j in defaults.indices where j > i {
+                let a = defaults[i], b = defaults[j]
+                XCTAssertEqual(overlapArea(a, b), 0,
+                               "\(a.name) 与 \(b.name) 存在面积重叠")
+            }
+        }
+    }
 }

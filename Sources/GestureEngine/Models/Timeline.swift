@@ -259,6 +259,9 @@ public struct NodeParams: Codable, Hashable {
     public var method: ExecutionMethod?  // consume
     public var step: Float?              // consume
     public var waveform: Int32?          // haptic
+    /// haptic：引用 AppConfig.customWaveforms 中的自定义波形；
+    /// 非 nil 时优先于 waveform（预设 ID），为 nil 时走预设波形
+    public var customWaveformID: UUID?
     public var count: Int?               // haptic
     public var intervalUs: Int32?        // haptic
     public var async: Bool?              // haptic
@@ -319,6 +322,7 @@ public struct NodeParams: Codable, Hashable {
                 method: ExecutionMethod? = nil,
                 step: Float? = nil,
                 waveform: Int32? = nil,
+                customWaveformID: UUID? = nil,
                 count: Int? = nil,
                 intervalUs: Int32? = nil,
                 async: Bool? = nil,
@@ -372,6 +376,7 @@ public struct NodeParams: Codable, Hashable {
         self.method = method
         self.step = step
         self.waveform = waveform
+        self.customWaveformID = customWaveformID
         self.count = count
         self.intervalUs = intervalUs
         self.async = async
@@ -432,6 +437,7 @@ public struct NodeParams: Codable, Hashable {
         case "method":         p.method = value as? ExecutionMethod
         case "step":           p.step = value as? Float
         case "waveform":       p.waveform = value as? Int32
+        case "customWaveformID": p.customWaveformID = value as? UUID
         case "count":          p.count = value as? Int
         case "intervalUs":     p.intervalUs = value as? Int32
         case "async":          p.async = value as? Bool

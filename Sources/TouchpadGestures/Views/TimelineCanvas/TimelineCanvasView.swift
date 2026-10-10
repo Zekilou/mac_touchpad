@@ -28,6 +28,8 @@ struct TimelineCanvasView: View {
     /// 绑定可选项（region/event 节点参数 Picker 数据源）
     let events: [EventConfig]
     let regions: [RegionConfig]
+    /// 自定义波形库（透传给节点参数面板）
+    var customWaveforms: [CustomWaveform] = []
     /// 打开模块内部（嵌套画布导航：双击 module 或「打开内部…」按钮）
     let onOpenModule: (UUID) -> Void
     /// 导航令牌：进入/返回模块时外层 +1，画布重置视图（居中/适应内容）
@@ -376,6 +378,7 @@ struct TimelineCanvasView: View {
                 timeline: timeline,
                 events: events,
                 regions: regions,
+                customWaveforms: customWaveforms,
                 params: Binding(
                     get: { timeline.nodes[idx].params },
                     set: { timeline.nodes[idx].params = $0 }

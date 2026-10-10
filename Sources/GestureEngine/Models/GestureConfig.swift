@@ -314,8 +314,13 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
             tapMaxGap: rec?.tapMaxGap ?? 0.30,
             holdMinDuration: rec?.holdMinDuration ?? 0.20)
         let event = events.first { $0.id == boundEventID } ?? EventConfig.defaultVolume
-        timeline = TimelineMigrator.migrate(pipeline: pipeline, event: event,
-                                            regionID: boundRegionID, eventID: boundEventID)
+        // 提升为局部常量：闭包内引用 self 会与 timeline 的写入产生独占访问冲突
+        let regionID = boundRegionID
+        let eventID = boundEventID
+        rebuildTimelinePreservingWaveforms {
+            TimelineMigrator.migrate(pipeline: pipeline, event: event,
+                                     regionID: regionID, eventID: eventID)
+        }
     }
 
     /// **v9 升级**：v8 扁平展开图（varRef 在根图、无 module 组）→ 重新迁移为模块化图
@@ -363,8 +368,13 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
             tapMaxGap: Double(threshold("间隔内?") ?? threshold("间隔超时?") ?? 0.30),
             holdMinDuration: Double(threshold("保持够久?") ?? 0.20))
         let event = events.first { $0.id == boundEventID } ?? EventConfig.defaultVolume
-        timeline = TimelineMigrator.migrate(pipeline: pipeline, event: event,
-                                            regionID: boundRegionID, eventID: boundEventID)
+        // 提升为局部常量：闭包内引用 self 会与 timeline 的写入产生独占访问冲突
+        let regionID = boundRegionID
+        let eventID = boundEventID
+        rebuildTimelinePreservingWaveforms {
+            TimelineMigrator.migrate(pipeline: pipeline, event: event,
+                                     regionID: regionID, eventID: eventID)
+        }
     }
 
     /// **v10.17 升级**：旧边界分流结构 → 无分流（quantize.tick → consume 直接）。
@@ -416,8 +426,13 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
             tapMaxGap: Double(threshold("间隔内?") ?? threshold("间隔超时?") ?? 0.30),
             holdMinDuration: Double(threshold("保持够久?") ?? 0.20))
         let event = events.first { $0.id == boundEventID } ?? EventConfig.defaultVolume
-        timeline = TimelineMigrator.migrate(pipeline: pipeline, event: event,
-                                            regionID: boundRegionID, eventID: boundEventID)
+        // 提升为局部常量：闭包内引用 self 会与 timeline 的写入产生独占访问冲突
+        let regionID = boundRegionID
+        let eventID = boundEventID
+        rebuildTimelinePreservingWaveforms {
+            TimelineMigrator.migrate(pipeline: pipeline, event: event,
+                                     regionID: regionID, eventID: eventID)
+        }
     }
 
     /// **v10.16 升级**：旧 Force 图 → 新结构（pressure 来自 touchData 原始 zP + T5 滑出区域退出 + T4 滞回退出）。
@@ -444,7 +459,18 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         }?.from.portName
         let wrongTickSource = gateValueSource != nil && gateValueSource != "normY"
         // Force 进入震动必须用 buzz（波形3）——与系统触控板点击（click 1/2）区分（用户反馈）
-        let oldEnterWave = tl.nodes.first { $0.type == .haptic && $0.title == "进入震动" }?.params.waveform != 3
+        //
+        // 关键修复（用户反馈"改了波形参数但手感不变"）：
+        // 原判定 `waveform != 3` 有两个误判来源，都会导致每次 load 整图重建、
+        // 把用户的自定义波形引用冲掉（图变了但实际震动不变）：
+        //   ① 用户改用**自定义波形**时忽略预设 ID → 判定恒为真
+        //   ② 用户**关闭**进入震动（节点被删）→ nil != 3 也判定为真
+        // 修正：节点存在、且没有自定义波形引用、且预设 ID 非 3 —— 三者同时成立才算旧图。
+        let enterHaptic = tl.nodes.first { $0.type == .haptic && $0.title == "进入震动" }?.params
+        let oldEnterWave: Bool = {
+            guard let h = enterHaptic else { return false }   // 节点缺失 = 用户主动关闭，尊重之
+            return h.customWaveformID == nil && h.waveform != 3
+        }()
         // 边界分流整体移除（trackedValue 漂移误判"朝外"→ 值卡中间；系统自身 clamp 处理边界）
         let hasBoundaryState = tl.firstNode(of: .boundaryState) != nil
         guard !hasLastTouch || pressureFromTouchData || !hasRelease || wrongTickSource
@@ -458,10 +484,14 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
         var pipeline = legacyPipelineValue
         pipeline.signalSource = .normY
         pipeline.hapticEnter = HapticEvent(enabled: true, waveform: 3, count: 1, intervalUs: 0)
-        timeline = TimelineMigrator.migrate(pipeline: pipeline, event: event,
-                                            regionID: boundRegionID, eventID: boundEventID,
-                                            touchSizeMin: 0.1, touchSizeMax: 1.35,
-                                            useForcePress: (threshold, hold))
+        let regionID = boundRegionID
+        let eventID = boundEventID
+        rebuildTimelinePreservingWaveforms {
+            TimelineMigrator.migrate(pipeline: pipeline, event: event,
+                                     regionID: regionID, eventID: eventID,
+                                     touchSizeMin: 0.1, touchSizeMax: 1.35,
+                                     useForcePress: (threshold, hold))
+        }
     }
 
     // MARK: - 信号源/步长（引擎从单图读取）
@@ -634,6 +664,82 @@ public struct GestureConfig: Codable, Identifiable, Equatable, Hashable {
             if let w = waveform { p.waveform = w }
             if let c = count { p.count = c }
             if let i = intervalUs { p.intervalUs = i }
+        }
+    }
+
+    /// 写自定义波形引用（nil = 回退到预设波形 waveform）
+    public mutating func setHapticCustomWaveform(_ title: String, id: UUID?) {
+        updateNodeParams(.haptic, title: title) { $0.customWaveformID = id }
+    }
+
+    // MARK: - 整图重建时的自定义波形保护
+
+    /// 收集图中所有 haptic 节点的自定义波形绑定（标题 → 波形 ID，递归子图）。
+    ///
+    /// 用途：v8~v10 的升级函数都是「整图重建」（TimelineMigrator 重新生成一张图），
+    /// 用户后来绑定的自定义波形不在迁移器的参数模型里，重建后会丢失——
+    /// 表现为「波形图变了但实际手感不变」。升级前后用本快照保存/恢复即可。
+    private var customWaveformBindings: [String: UUID] {
+        var result: [String: UUID] = [:]
+        Self.collectBindings(in: timeline, into: &result)
+        return result
+    }
+
+    private static func collectBindings(in tl: TimelineConfig, into result: inout [String: UUID]) {
+        for n in tl.nodes {
+            if n.type == .haptic, let title = n.title, let id = n.params.customWaveformID {
+                result[title] = id
+            }
+            if let sub = n.subgraph {
+                collectBindings(in: sub, into: &result)
+            }
+        }
+    }
+
+    /// 把快照中的自定义波形绑定写回当前图（按 haptic 标题匹配，递归子图）。
+    private mutating func restoreCustomWaveformBindings(_ bindings: [String: UUID]) {
+        guard !bindings.isEmpty else { return }
+        for (title, id) in bindings {
+            updateNodeParams(.haptic, title: title) { params in
+                // 仅在该节点尚未绑定自定义波形时恢复，避免覆盖用户在当前图里的新选择
+                if params.customWaveformID == nil {
+                    params.customWaveformID = id
+                }
+            }
+        }
+    }
+
+    /// 整图重建包装：重建前快照自定义波形绑定，重建后恢复。
+    /// 所有 `timeline = TimelineMigrator.migrate(...)` 形式的升级都必须走这里，
+    /// 否则用户的波形绑定会在每次启动时被静默冲掉。
+    private mutating func rebuildTimelinePreservingWaveforms(
+        _ body: () -> TimelineConfig) {
+        let bindings = customWaveformBindings
+        timeline = body()
+        restoreCustomWaveformBindings(bindings)
+    }
+
+    /// 解绑所有引用该自定义波形的 haptic 节点（删除波形时调用，回退为预设波形）
+    /// - Returns: 被解绑的节点数量
+    @discardableResult
+    public mutating func unbindCustomWaveform(id: UUID) -> Int {
+        var count = 0
+        var tl = timeline
+        Self.unbind(in: &tl, id: id, count: &count)
+        timeline = tl
+        return count
+    }
+
+    private static func unbind(in tl: inout TimelineConfig, id: UUID, count: inout Int) {
+        for i in tl.nodes.indices {
+            if tl.nodes[i].params.customWaveformID == id {
+                tl.nodes[i].params.customWaveformID = nil
+                count += 1
+            }
+            if var sub = tl.nodes[i].subgraph {
+                unbind(in: &sub, id: id, count: &count)
+                tl.nodes[i].subgraph = sub
+            }
         }
     }
 }

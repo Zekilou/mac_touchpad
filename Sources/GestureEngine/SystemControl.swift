@@ -1,10 +1,11 @@
 import Foundation
 import CoreAudio
 import AppKit
+import ApplicationServices
 import IOKit
 import IOKit.graphics
 
-/// 系统控制：音量 + 亮度
+/// 系统控制：音量 + 亮度 + 媒体进度
 public enum SystemControl {
 
     // MARK: - 测试钩子（单元测试注入，绕过真实系统读写）
@@ -13,6 +14,9 @@ public enum SystemControl {
     static var mockVolume: Float?
     /// 非 nil 时 getBrightness 返回 mock 值（测试用；nil = 走真实系统读取）
     static var mockBrightness: Float?
+    /// 非 nil 时 getSeekPosition 返回 mock 值；setSeekPosition 返回 mockSetOK（测试用）
+    static var mockSeekPosition: Float?
+    static var mockSetSeekOK: Bool?
 
     // MARK: - 音量读取
 
@@ -172,5 +176,92 @@ public enum SystemControl {
         }
         return success
     }
+
+    // MARK: - 媒体进度控制（AX API + 方向键回退）
+
+    /// AXSlider 缓存：避免每 tick 遍历 AX 树（遍历成本 ~10-50ms）
+    private static var cachedSlider: AXUIElement?
+    private static var sliderCacheTime: Double = 0
+    private static let sliderCacheTTL: Double = 5.0   // 5 秒后失效重查
+
+    /// 递归搜索 AX 树找 AXSlider（带深度限制，防极端深树卡死）
+    private static func findSlider(in element: AXUIElement, depth: Int = 0, maxDepth: Int = 8) -> AXUIElement? {
+        var role: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        if let roleStr = role as? String, roleStr == "AXSlider" {
+            return element
+        }
+        guard depth < maxDepth else { return nil }
+        var children: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
+        if let array = children as? [AXUIElement] {
+            for child in array {
+                if let found = findSlider(in: child, depth: depth + 1, maxDepth: maxDepth) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
+
+    /// 查找焦点 app 的 AXSlider（带缓存）
+    private static func findSeekSlider() -> AXUIElement? {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - sliderCacheTime < sliderCacheTTL, let cached = cachedSlider {
+            // 验证缓存元素仍有效
+            var role: CFTypeRef?
+            AXUIElementCopyAttributeValue(cached, kAXRoleAttribute as CFString, &role)
+            if role as? String == "AXSlider" { return cached }
+        }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        if let found = findSlider(in: axApp) {
+            cachedSlider = found
+            sliderCacheTime = now
+            return found
+        }
+        cachedSlider = nil
+        return nil
+    }
+
+    /// 读取当前媒体进度（0~1），找不到 AXSlider 返回 nil
+    public static func getSeekPosition() -> Float? {
+        if let m = mockSeekPosition { return m }
+        guard let slider = findSeekSlider() else { return nil }
+        var value: CFTypeRef?
+        AXUIElementCopyAttributeValue(slider, kAXValueAttribute as CFString, &value)
+        guard let num = value as? NSNumber else { return nil }
+        return num.floatValue
+    }
+
+    /// 设置媒体进度（0~1），成功返回 true；找不到 AXSlider 返回 false
+    @discardableResult
+    public static func setSeekPosition(_ ratio: Float) -> Bool {
+        if let ok = mockSetSeekOK { return ok }
+        let clamped = max(0.0, min(1.0, ratio))
+        guard let slider = findSeekSlider() else { return false }
+        let num = NSNumber(value: clamped)
+        let err = AXUIElementSetAttributeValue(slider, kAXValueAttribute as CFString, num)
+        return err == .success
+    }
+
+    // MARK: - 方向键回退（AXSlider 未找到时使用）
+
+    /// 发送方向键（←/→），用于 seek 回退
+    private static func postArrowKey(_ keyCode: CGKeyCode) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastKeyTime >= keyInterval else { return }
+        lastKeyTime = now
+        let source = CGEventSource(stateID: .hidSystemState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    /// 快进（→ 方向键，keyCode 124）
+    public static func seekForward()  { postArrowKey(0x7C) }
+    /// 快退（← 方向键，keyCode 123）
+    public static func seekBackward() { postArrowKey(0x7B) }
 
 }

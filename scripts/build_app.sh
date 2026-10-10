@@ -114,17 +114,23 @@ let rep = NSBitmapImageRep(data: tiff)!
 let png = rep.representation(using: .png, properties: [:])!
 try! png.write(to: URL(fileURLWithPath: "/tmp/AppIcon_1024.png"))
 SWIFT
-swift /tmp/render_icon.swift
+swift -module-cache-path "$PROJECT_DIR/.build/modulecache" /tmp/render_icon.swift || {
+    echo "[warn] 图标渲染失败，跳过自定义图标（App 仍可正常使用）"
+    rm -rf "$ICONSET"
+    ICON_OK=0
+}
 
-# 生成各尺寸
-for spec in "16 16" "32 16@2x" "32 32" "64 32@2x" "128 128" "256 128@2x" "256 256" "512 256@2x" "512 512" "1024 512@2x"; do
-    set -- $spec
-    SIZE=$1
-    NAME=$2
-    sips -z $SIZE $SIZE /tmp/AppIcon_1024.png --out "$ICONSET/icon_$NAME.png" >/dev/null 2>&1
-done
-iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null || echo "[warn] iconutil 失败，跳过 icns"
-rm -rf "$ICONSET"
+# 生成各尺寸（仅当渲染成功时）
+if [ "${ICON_OK:-1}" = "1" ] && [ -f /tmp/AppIcon_1024.png ]; then
+    for spec in "16 16" "32 16@2x" "32 32" "64 32@2x" "128 128" "256 128@2x" "256 256" "512 256@2x" "512 512" "1024 512@2x"; do
+        set -- $spec
+        SIZE=$1
+        NAME=$2
+        sips -z $SIZE $SIZE /tmp/AppIcon_1024.png --out "$ICONSET/icon_$NAME.png" >/dev/null 2>&1
+    done
+    iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null || echo "[warn] iconutil 失败，跳过 icns"
+    rm -rf "$ICONSET"
+fi
 
 # 解压后会出现 "已损坏" 提示：未签名 + com.apple.quarantine 属性导致 Gatekeeper 拦截
 # ad-hoc 签名可消除 "damaged" 提示（仍会提示"无法验证开发者"，用户右键打开即可）

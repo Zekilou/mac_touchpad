@@ -81,7 +81,8 @@ struct EventTabView: View {
                                 .pickerStyle(.segmented)
                                 .labelsHidden()
                             }
-                            Text(executionHint(for: config.events[idx].executionMethod))
+                            Text(executionHint(for: config.events[idx].executionMethod,
+                                               actionType: config.events[idx].actionType))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -110,34 +111,37 @@ struct EventTabView: View {
                                 get: { Double(config.events[idx].step) },
                                 set: { config.events[idx].step = Float($0) }
                             ), in: stepRange(for: config.events[idx].executionMethod))
-                            Text(stepHint(for: config.events[idx].executionMethod))
+                            Text(stepHint(for: config.events[idx].executionMethod,
+                                          actionType: config.events[idx].actionType))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
 
-                    // 5. 边界检测（数值在上方）
-                    Card(title: L10n.tr("边界检测", "Boundary Detection")) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text(L10n.tr("边界判定阈值", "Boundary Threshold"))
-                                    .frame(width: 150, alignment: .leading)
-                                Text(String(format: "%.3f", config.events[idx].boundaryThreshold))
-                                    .monospacedDigit()
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                resetBtn(tooltip: L10n.tr("恢复阈值", "Reset threshold")) {
-                                    let def = defaultFor(actionType: config.events[idx].actionType)
-                                    config.events[idx].boundaryThreshold = def.boundaryThreshold
+                    // 5. 边界检测（数值在上方）——进度事件无边界（由焦点 App 自己 clamp）
+                    if config.events[idx].actionType != .seek {
+                        Card(title: L10n.tr("边界检测", "Boundary Detection")) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text(L10n.tr("边界判定阈值", "Boundary Threshold"))
+                                        .frame(width: 150, alignment: .leading)
+                                    Text(String(format: "%.3f", config.events[idx].boundaryThreshold))
+                                        .monospacedDigit()
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    resetBtn(tooltip: L10n.tr("恢复阈值", "Reset threshold")) {
+                                        let def = defaultFor(actionType: config.events[idx].actionType)
+                                        config.events[idx].boundaryThreshold = def.boundaryThreshold
+                                    }
                                 }
+                                Slider(value: Binding(
+                                    get: { Double(config.events[idx].boundaryThreshold) },
+                                    set: { config.events[idx].boundaryThreshold = Float($0) }
+                                ), in: 0.001...0.05)
+                                Text(L10n.tr("当前值 ≤ 阈值视为 0%，≥ 1-阈值视为 100%。阈值越大越保守。",
+                                            "Value ≤ threshold = 0%, ≥ 1-threshold = 100%. Larger = more conservative."))
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
-                            Slider(value: Binding(
-                                get: { Double(config.events[idx].boundaryThreshold) },
-                                set: { config.events[idx].boundaryThreshold = Float($0) }
-                            ), in: 0.001...0.05)
-                            Text(L10n.tr("当前值 ≤ 阈值视为 0%，≥ 1-阈值视为 100%。阈值越大越保守。",
-                                        "Value ≤ threshold = 0%, ≥ 1-threshold = 100%. Larger = more conservative."))
-                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -183,7 +187,11 @@ struct EventTabView: View {
     }
 
     /// 执行方式说明文字
-    private func executionHint(for method: ExecutionMethod) -> String {
+    private func executionHint(for method: ExecutionMethod, actionType: ActionType) -> String {
+        if actionType == .seek {
+            return L10n.tr("通过辅助功能（AX）API 读写焦点 App 的进度条；找不到进度条时回退到 ←/→ 方向键。需要「辅助功能」权限。",
+                            "Reads/writes the focused app's progress slider via the Accessibility API; falls back to ←/→ keys when no slider is found.")
+        }
         switch method {
         case .mediaKey:
             return L10n.tr("模拟 F1/F2/F10/F11/F12 等系统媒体键，触发系统右上角 HUD，档位固定约 16 级。",
@@ -195,7 +203,11 @@ struct EventTabView: View {
     }
 
     /// step 说明文字
-    private func stepHint(for method: ExecutionMethod) -> String {
+    private func stepHint(for method: ExecutionMethod, actionType: ActionType) -> String {
+        if actionType == .seek {
+            return L10n.tr("每次触发移动总时长的比例；0.05 = 5%。实际步进由焦点 App 决定。",
+                            "Fraction of total duration moved per trigger; 0.05 = 5%. Actual step depends on the focused app.")
+        }
         switch method {
         case .mediaKey:
             return L10n.tr("系统档位约 1/16 = 0.0625；步长会影响「累积几帧才触发一次按键」。",
@@ -211,6 +223,7 @@ struct EventTabView: View {
         switch actionType {
         case .volume: return .defaultVolume
         case .brightness: return .defaultBrightness
+        case .seek: return .defaultSeek
         }
     }
 }

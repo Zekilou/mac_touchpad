@@ -186,6 +186,56 @@ void mt_stop_touch(mt_device_t dev);
  */
 int mt_actuate(uint64_t deviceID, int waveformID);
 
+/* ---------------------------------------------------------------------------
+ * 自定义波形（可编程触觉）
+ *
+ * 与 mt_actuate 的区别：mt_actuate 只能播放 Apple 出厂预设（1~64），
+ * mt_actuate_custom 按调用方给出的物理参数现场编译波形并播放，
+ * 使用框架内部的「宿主自定义波形」槽位，与预设波形互不干扰。
+ *
+ * 参数语义对齐 Apple 产线 actuation 定义（Gaussian 包络 + 单个音调 +
+ * 按压力度乘法器）。字段取值超出硬件动态范围时固件会饱和截断。
+ * 详见 docs/research/自定义波形可行性.md
+ * ------------------------------------------------------------------------- */
+
+/** 自定义波形参数（与 Swift 侧 WaveformSpec 一一对应） */
+typedef struct {
+    /* 包络（BaseWaveform）——决定"敲击感"的力度与时长 */
+    const char *envelope_type;   /* 包络类型，Apple 原生均为 "Gaussian" */
+    double      envelope_amplitude;    /* 峰值幅度，原生取值 0 / 19 / 22 / 35 */
+    double      envelope_duration_ms;  /* 包络时长 ms */
+    /* 音调（Tones[0]）——叠加在包络上，决定音色 */
+    const char *tone_type;       /* "Sine" 或 "Square" */
+    double      tone_frequency_khz;    /* 原生取值 0.1 / 1.18 / 1.263 / 3.6 */
+    double      tone_amplitude;        /* 原生取值 0.01 ~ 0.29 */
+    double      tone_duration_ms;
+    double      tone_delay_ms;
+    /* 按压力度分级乘法器（Light / Medium / Firm） */
+    double      envelope_light;
+    double      envelope_medium;
+    double      envelope_firm;
+    double      tone_light;
+    double      tone_medium;
+    double      tone_firm;
+} mt_waveform_t;
+
+/**
+ * 用自定义参数触发一次触觉反馈（Fire & Forget）。
+ * 每次调用都会创建新 actuator 句柄（与 mt_actuate 一致，句柄单次使用）。
+ *
+ * @param deviceID  设备 ID（同 mt_actuate）
+ * @param wf        波形参数
+ * @return  0  成功
+ *         -1  能力不可用（框架未初始化 / 系统未导出所需私有符号）
+ *             → 调用方应回退到 mt_actuate 预设波形
+ *         -2  参数被拒或设备不可用（波形编译失败 / actuator 打开失败）
+ *             → 不回退，避免与已下发的震动叠加成"双震"
+ *
+ * @note 若未来系统移除 MTActuationCreateFromDictionary，本函数返回 -1，
+ *       调用方回退预设波形即可保持基础触觉可用。
+ */
+int mt_actuate_custom(uint64_t deviceID, mt_waveform_t wf);
+
 /**
  * 诊断：将 MTDevice 结构体指定字节范围按 uint64_t 打印（每行 8 字节 + 偏移）。
  * 用于在不同硬件/系统上重新探测 deviceID 字段的正确偏移。

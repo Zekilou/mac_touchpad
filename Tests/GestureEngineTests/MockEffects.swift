@@ -3,7 +3,7 @@ import Foundation
 
 /// 记录副作用调用的 Mock，供各执行引擎测试共享
 final class MockEffects: TimelineEffects {
-    var hapticCalls: [(waveform: Int32, count: Int, intervalUs: Int32, async: Bool)] = []
+    var hapticCalls: [(waveform: Int32, customWaveformID: UUID?, count: Int, intervalUs: Int32, async: Bool)] = []
     var consumeOutputs: [GestureOutput] = []
     var hudDirections: [Int] = []
     var lockCount = 0
@@ -13,8 +13,8 @@ final class MockEffects: TimelineEffects {
     /// consume 返回值（默认 .normal）
     var consumeResult: BoundaryResult = .normal
 
-    func triggerHaptic(waveform: Int32, count: Int, intervalUs: Int32, async: Bool) {
-        hapticCalls.append((waveform, count, intervalUs, async))
+    func triggerHaptic(waveform: Int32, customWaveformID: UUID?, count: Int, intervalUs: Int32, async: Bool) {
+        hapticCalls.append((waveform, customWaveformID, count, intervalUs, async))
     }
     func consume(_ output: GestureOutput) -> BoundaryResult {
         consumeOutputs.append(output)

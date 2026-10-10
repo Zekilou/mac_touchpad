@@ -137,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         case .events:   return selectedEventID ?? config.events.first?.id
         case .regions:  return selectedRegionID ?? config.regions.first?.id
         case .morphology: return nil
+        case .waveforms: return nil
         case .settings: return nil
         }
     }
@@ -147,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         case .events:   return config.events.first { $0.id == selectedEventID }?.name ?? config.events.first?.name
         case .regions:  return config.regions.first { $0.id == selectedRegionID }?.name ?? config.regions.first?.name
         case .morphology: return nil
+        case .waveforms: return nil
         case .settings: return nil
         }
     }
@@ -157,6 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         case .events:   return config.events.count > 1
         case .regions:  return config.regions.count > 1
         case .morphology: return false
+        case .waveforms: return false
         case .settings: return false
         }
     }
@@ -174,6 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             let r = RegionConfig(name: L10n.tr("新区域", "New Region"), xMin: 0.4, xMax: 0.6, yMin: 0.4, yMax: 0.6)
             config.regions.append(r); selectedRegionID = r.id
         case .morphology: break
+        case .waveforms: break
         case .settings: break
         }
     }
@@ -193,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             if let i = config.events.firstIndex(where: { $0.id == id }) { config.events[i].name = name }
         case .regions:
             if let i = config.regions.firstIndex(where: { $0.id == id }) { config.regions[i].name = name }
-        case .morphology, .settings: break
+        case .morphology, .waveforms, .settings: break
         }
         renameText = ""
     }
@@ -213,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             let bound = config.gestures.filter { $0.boundRegionID == id }.count
             if bound > 0 { pendingDelete = .region(id); showDeleteAlert = true }
             else { performRegionDelete(id) }
-        case .morphology, .settings: break
+        case .morphology, .waveforms, .settings: break
         }
     }
 

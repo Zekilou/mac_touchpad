@@ -28,12 +28,14 @@ public enum NodeExecutors {
     ///   - state: 跨节点共享状态（baseline/transform.last/debounce.last/state 节点读写）
     ///   - effects: 副作用派发
     ///   - writePass: 模块帧末延迟重跑（注入写类输入端口，抑制副作用，只收集写请求）
+    ///   - moduleCache: module 子图 evaluator 缓存（避免每帧重建子图执行器）；nil 时每次新建
     public static func execute(node: NodeConfig,
                                inputs: [String: SocketValue],
                                frame: FrameContext,
                                state: inout StateStore,
                                effects: TimelineEffects,
-                               writePass: Bool = false) -> NodeExecutionResult {
+                               writePass: Bool = false,
+                               moduleCache: ModuleEvaluatorCache? = nil) -> NodeExecutionResult {
         let p = node.params
 
         switch node.type {
@@ -315,7 +317,8 @@ public enum NodeExecutors {
         /// 由 GraphEvaluator 帧末 writePass 重跑注入——避免「模块输出→tick 链→写类输入」同帧环
         case .module:
             guard let sub = node.subgraph,
-                  let subEval = GraphEvaluator(timeline: sub) else { return invalidOutputs(node) }
+                  let subEval = moduleCache?.evaluator(forNodeID: node.id, subgraph: sub)
+                                ?? GraphEvaluator(timeline: sub) else { return invalidOutputs(node) }
             var injected: [UUID: [String: SocketValue]] = [:]
             for n in sub.nodes where n.type == .moduleInput {
                 let portName = n.params.modulePortName ?? "value"
@@ -354,6 +357,7 @@ public enum NodeExecutors {
         case .haptic:
             guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
             effects.triggerHaptic(waveform: p.waveform ?? 0,
+                                  customWaveformID: p.customWaveformID,
                                   count: p.count ?? 1,
                                   intervalUs: p.intervalUs ?? 0,
                                   async: p.async ?? true)

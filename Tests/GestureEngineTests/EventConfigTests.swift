@@ -12,13 +12,15 @@ final class EventConfigTests: XCTestCase {
     override func tearDown() {
         SystemControl.mockVolume = nil
         SystemControl.mockBrightness = nil
+        SystemControl.mockSeekPosition = nil
+        SystemControl.mockSetSeekOK = nil
         super.tearDown()
     }
 
     // MARK: - ActionType
 
     func testActionType_allCasesCount() {
-        XCTAssertEqual(ActionType.allCases.count, 2)
+        XCTAssertEqual(ActionType.allCases.count, 3)
     }
 
     func testActionType_displayNames_nonEmpty() {
@@ -26,7 +28,7 @@ final class EventConfigTests: XCTestCase {
             // displayName 含完整按键说明，shortName 是紧凑名，都不能空
             XCTAssertFalse(type.displayName.isEmpty, "\(type) displayName 为空")
             XCTAssertFalse(type.shortName.isEmpty, "\(type) shortName 为空")
-            // displayName 里至少要包含目标（音量/Volume / 亮度/Brightness）关键字
+            // displayName 里至少要包含目标（音量/Volume / 亮度/Brightness / 进度/Seek）关键字
             switch type {
             case .volume:
                 XCTAssertTrue(
@@ -37,6 +39,11 @@ final class EventConfigTests: XCTestCase {
                 XCTAssertTrue(
                     type.displayName.contains("Brightness") || type.displayName.contains("亮度"),
                     "brightness.displayName 未含亮度关键字: \(type.displayName)"
+                )
+            case .seek:
+                XCTAssertTrue(
+                    type.displayName.contains("Seek") || type.displayName.contains("进度"),
+                    "seek.displayName 未含进度关键字: \(type.displayName)"
                 )
             }
         }
@@ -253,5 +260,50 @@ final class EventConfigTests: XCTestCase {
         SystemControl.mockVolume = 0.999
         let result = event.consume(output: .tick(direction: 1, count: 1))
         XCTAssertEqual(result, .hitBoundary, "direct 到上边界 → hitBoundary")
+    }
+
+    // MARK: - seek（媒体进度：AX API 写值，不做边界检测）
+
+    /// AX 写值成功 → 信任写入值推进 trackedValue，恒 .normal（进度由 app 自己 clamp）
+    func testConsume_direct_seek_writesSlider_noBoundary() {
+        SystemControl.mockSeekPosition = 0.4
+        SystemControl.mockSetSeekOK = true
+        var event = EventConfig.defaultSeek
+        XCTAssertEqual(event.consume(output: .tick(direction: 1, count: 1)), .normal)
+        XCTAssertEqual(event.trackedCurrentValue(), 0.45, accuracy: 1e-6,
+                       "seek 每次 tick 推进 step（0.4 + 0.05）")
+        // 到 100% 也恒 .normal（无边界判定）
+        event.setTrackedValueForTesting(1.0)
+        XCTAssertEqual(event.consume(output: .tick(direction: 1, count: 1)), .normal)
+        XCTAssertEqual(event.trackedCurrentValue(), 1.0, accuracy: 1e-6, "clamp 到 1.0")
+    }
+
+    /// seek 反向：右滑=快进（positiveIncrease），direction -1 时值减少
+    func testConsume_direct_seek_backward() {
+        SystemControl.mockSeekPosition = 0.6
+        SystemControl.mockSetSeekOK = true
+        var event = EventConfig.defaultSeek
+        XCTAssertEqual(event.consume(output: .tick(direction: -1, count: 2)), .normal)
+        XCTAssertEqual(event.trackedCurrentValue(), 0.5, accuracy: 1e-6,
+                       "倒退 2 tick：0.6 - 0.05×2")
+    }
+
+    /// seek 读值：mock 注入直接返回；无 mock 且找不到 AXSlider 时 nil → currentValue 回退 0
+    func testSeekPosition_mockHooks() {
+        SystemControl.mockSeekPosition = 0.75
+        XCTAssertEqual(SystemControl.getSeekPosition() ?? -1, 0.75, accuracy: 1e-6)
+        SystemControl.mockSetSeekOK = true
+        XCTAssertTrue(SystemControl.setSeekPosition(0.3))
+        SystemControl.mockSetSeekOK = false
+        XCTAssertFalse(SystemControl.setSeekPosition(0.3))
+    }
+
+    /// defaultSeek 配置：direct 执行方式 + 右滑快进 + 不做进入时 HUD
+    func testDefaultSeek_config() {
+        let e = EventConfig.defaultSeek
+        XCTAssertEqual(e.actionType, .seek)
+        XCTAssertEqual(e.executionMethod, .direct)
+        XCTAssertEqual(e.directionRule, .positiveIncrease)
+        XCTAssertGreaterThan(e.step, 0)
     }
 }

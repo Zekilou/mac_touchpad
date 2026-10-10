@@ -115,6 +115,8 @@ struct TimelineNodeView: View {
     /// 绑定可选项（region/event 参数 Picker 数据源）
     let events: [EventConfig]
     let regions: [RegionConfig]
+    /// 自定义波形库（haptic 节点参数面板的波形选择器数据源）
+    var customWaveforms: [CustomWaveform] = []
     /// 参数编辑绑定（写回 timeline）
     @Binding var params: NodeParams
     /// 本节点的入/出边（展开时列出并支持删除）
@@ -165,7 +167,8 @@ struct TimelineNodeView: View {
                         params: $params,
                         nodeType: node.type,
                         events: events,
-                        regions: regions
+                        regions: regions,
+                        customWaveforms: customWaveforms
                     )
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)

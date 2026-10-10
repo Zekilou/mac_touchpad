@@ -12,26 +12,24 @@ struct NodeParamsEditorView: View {
     /// 绑定可选项（region/event 节点的 Picker 数据源）
     let events: [EventConfig]
     let regions: [RegionConfig]
+    /// 自定义波形库（waveform 行的自定义选择器数据源）
+    var customWaveforms: [CustomWaveform] = []
 
-    /// 波形手感描述（ID, 中文, 英文）——直接显示在参数行
-    private let waveformCatalog: [(Int32, String, String)] = [
-        (1,  "弱 click",               "Weak click"),
-        (2,  "强 click (Force Touch)", "Strong click (Force Touch)"),
-        (3,  "buzz 震颤",               "Buzz"),
-        (4,  "轻 tap",                 "Light tap"),
-        (5,  "中 tap",                 "Medium tap"),
-        (6,  "强 tap",                 "Strong tap"),
-        (15, "软重击",                  "Soft hit"),
-        (16, "强重击",                  "Strong hit"),
-    ]
-
-    private func waveformDescription(_ id: Int32) -> String {
-        waveformCatalog.first { $0.0 == id }.map { L10n.tr($0.1, $0.2) } ?? "?"
+    /// 参与渲染的参数行：
+    /// - 隐藏 customWaveformID（由 waveform 行统一呈现，避免重复一行）
+    /// - haptic 节点始终补一行 waveform：即使未设置（新建空节点）也给出
+    ///   「预设/自定义 + 预览」入口，否则用户无从配置
+    private var displayRows: [(String, Any)] {
+        var rows = params.typedRows.filter { $0.0 != "customWaveformID" }
+        if nodeType == .haptic && !rows.contains(where: { $0.0 == "waveform" }) {
+            rows.insert(("waveform", Int32(params.waveform ?? 2)), at: 0)
+        }
+        return rows
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            let rows = params.typedRows
+            let rows = displayRows
             if rows.isEmpty {
                 Text(L10n.tr("（无参数）", "(no params)"))
                     .font(.caption2).foregroundStyle(.secondary)
@@ -55,20 +53,31 @@ struct NodeParamsEditorView: View {
         case let v as Double:     doubleField(key: key, value: v)
         case let v as Int32:
             if key == "waveform" {
-                HStack(spacing: 4) {
-                    int32Stepper(key: key, value: v)
-                    Text(waveformDescription(v))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                // 波形选择：预设 / 自定义 + 缩略预览
+                WaveformPickerRow(
+                    presetID: Binding(
+                        get: { v },
+                        set: { params = params.setting(key: key, $0) }
+                    ),
+                    customWaveformID: Binding(
+                        get: { params.customWaveformID },
+                        set: { params.customWaveformID = $0 }
+                    ),
+                    customWaveforms: customWaveforms,
+                    compact: true)
             } else {
                 int32Stepper(key: key, value: v)
             }
         case let v as Int:        intStepper(key: key, value: v)
         case let v as Bool:       boolToggle(key: key, value: v)
         case let v as String:     stringField(key: key, value: v)
-        case let v as UUID:       uuidPicker(key: key, value: v)
+        case let v as UUID:
+            if key == "customWaveformID" {
+                // 已由 waveform 行统一呈现，避免重复一行
+                EmptyView()
+            } else {
+                uuidPicker(key: key, value: v)
+            }
         case let v as SignalSource:   enumPicker(key: key, value: v, allCases: SignalSource.allCases) { $0.displayName }
         case let v as TransformMode:  enumPicker(key: key, value: v, allCases: TransformMode.allCases) { $0.displayName }
         case let v as TriggerMode:    enumPicker(key: key, value: v, allCases: TriggerMode.allCases) { $0.displayName }

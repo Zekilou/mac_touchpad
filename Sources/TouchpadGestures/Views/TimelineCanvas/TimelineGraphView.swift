@@ -12,6 +12,8 @@ struct TimelineGraphView: View {
     /// 绑定可选项（region/event 引用节点参数面板数据源）
     let events: [EventConfig]
     let regions: [RegionConfig]
+    /// 自定义波形库（透传到节点参数面板的波形选择器）
+    var customWaveforms: [CustomWaveform] = []
     /// 手势启用开关（图的全局设置）
     @Binding var enabled: Bool
 
@@ -46,6 +48,7 @@ struct TimelineGraphView: View {
                                    excludeRect: $paletteFrame,
                                    events: events,
                                    regions: regions,
+                                   customWaveforms: customWaveforms,
                                    onOpenModule: { id in openModule(id) },
                                    resetToken: resetToken,
                                    onCopy: { copySelection() },
