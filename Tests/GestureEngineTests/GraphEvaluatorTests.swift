@@ -38,6 +38,56 @@ final class GraphEvaluatorTests: XCTestCase {
 
     // MARK: - 数据链执行
 
+    /// 回归：set/toggle 的写请求必须经"第一遍计算 → 第二遍收集 → 帧尾 flush"生效。
+    /// 原缺陷：执行器在第一遍直接写 state，第二遍又排一次取反 → 帧尾 flush 后净效果等于原值，
+    /// **toggle 永远不生效**（静默空操作）；set 则违反摩尔语义（同帧后续节点可见新值）。
+    func testToggleActuallyFlipsAcrossFramesThroughFullEvaluation() {
+        // value(bool true) → toggle(trigger)，两者恒有效 → 每帧都翻转
+        let src = NodeConfig(type: .value, params: NodeParams(constantBool: true))
+        let toggle = NodeConfig(type: .toggle, params: NodeParams(key: "flag"))
+        let timeline = TimelineConfig(trigger: .onTick,
+                                      nodes: [src, toggle],
+                                      edges: [edge(src, toggle, fromPort: "value", toPort: "trigger")],
+                                      entryNodeIDs: [src.id])
+        guard let evaluator = GraphEvaluator(timeline: timeline) else {
+            return XCTFail("init 失败")
+        }
+        let frame = FrameContext()
+        evaluator.evaluate(frame: frame, state: &state, effects: effects)
+        XCTAssertEqual(state["flag"]?.boolValue, true, "第 1 帧应从无值(false)翻转为 true")
+        evaluator.evaluate(frame: frame, state: &state, effects: effects)
+        XCTAssertEqual(state["flag"]?.boolValue, false, "第 2 帧应翻转回 false（原缺陷下恒为 true）")
+        evaluator.evaluate(frame: frame, state: &state, effects: effects)
+        XCTAssertEqual(state["flag"]?.boolValue, true, "第 3 帧应再次翻转为 true")
+    }
+
+    /// 回归：set 写入必须延迟到帧尾——同帧读者看到的仍是旧值（摩尔语义）。
+    func testSetWriteIsNotVisibleToLaterNodesInSameFrame() {
+        // value(1) + trigger → set(phase=1)；另一支 varRef(读 phase) → state 记录观察值
+        let trig = NodeConfig(type: .value, params: NodeParams(constantBool: true))
+        let val = NodeConfig(type: .value, params: NodeParams(constant: 1))
+        let setNode = NodeConfig(type: .set, params: NodeParams(key: "phase"))
+        let reader = NodeConfig(type: .varRef, params: NodeParams(key: "phase"))
+        let sink = NodeConfig(type: .state, params: NodeParams(key: "observed"))
+        let timeline = TimelineConfig(
+            trigger: .onTick,
+            nodes: [trig, val, setNode, reader, sink],
+            edges: [edge(trig, setNode, fromPort: "value", toPort: "trigger"),
+                    edge(val, setNode, fromPort: "value", toPort: "value"),
+                    edge(reader, sink, fromPort: "value", toPort: "value")],
+            entryNodeIDs: [trig.id])
+        guard let evaluator = GraphEvaluator(timeline: timeline) else {
+            return XCTFail("init 失败")
+        }
+        evaluator.evaluate(frame: FrameContext(), state: &state, effects: effects)
+        // 本帧：set 在帧尾把 phase 写成 1；但 reader 本帧读到的是旧值（无值 → invalid → state 不写）
+        XCTAssertEqual(state["phase"]?.floatValue, 1, "set 应在帧尾写入 phase=1")
+        XCTAssertNil(state["observed"], "同帧读者不应看到刚写入的新值（摩尔语义）")
+        // 下一帧：reader 才能读到 1
+        evaluator.evaluate(frame: FrameContext(), state: &state, effects: effects)
+        XCTAssertEqual(state["observed"]?.floatValue, 1, "下一帧读者应读到 phase=1")
+    }
+
     func testLinearChainValueScaleGate() {
         // value(5) → scale(×2) → gate(≥10) → state 记录
         let value = NodeConfig(type: .value, params: NodeParams(constant: 5))

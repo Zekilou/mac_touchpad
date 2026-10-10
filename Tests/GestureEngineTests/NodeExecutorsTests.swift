@@ -267,27 +267,34 @@ final class NodeExecutorsTests: XCTestCase {
     /// set：trigger 脉冲时把 value 写入 state[key]，输出 unit
     func testSetWritesVariableOnTrigger() {
         let set = floatNode(.set, NodeParams(key: "cursorLocked"))
-        // 无 trigger → 不执行
-        _ = exec(set, inputs: ["value": .float(1)])
+        // 无 trigger → 不执行、不产生写请求
+        let noTrigger = exec(set, inputs: ["value": .float(1)])
+        XCTAssertTrue(noTrigger.writes.isEmpty)
         XCTAssertNil(state["cursorLocked"])
-        // 有效 trigger → 写入
+        // 有效 trigger → 输出 unit，且写请求随结果返回（**不在此直接改 state**：
+        // 直接改会让同帧后续节点读到新值，违反摩尔语义；帧尾由 GraphEvaluator 统一 flush）
         let r = exec(set, inputs: ["trigger": .unit(), "value": .float(1)])
         XCTAssertEqual(r.outputs?["result"], .unit())
-        XCTAssertEqual(state["cursorLocked"]?.floatValue, 1)
+        XCTAssertEqual(r.writes.count, 1)
+        XCTAssertEqual(r.writes.first?.key, "cursorLocked")
+        XCTAssertEqual(r.writes.first?.value.floatValue, 1)
+        XCTAssertNil(state["cursorLocked"], "执行器不得直接写 state（应延迟到帧尾）")
     }
 
-    /// toggle：trigger 脉冲时对 state[key] 取反（bool），输出 unit
+    /// toggle：trigger 脉冲时对 state[key] 取反（bool），输出 unit。
+    /// 回归：原实现在第一遍写一次、第二遍再排一次取反 → 帧尾 flush 后净效果等于原值，
+    /// **toggle 永远不生效**。此处断言执行器只返回写请求、不动 state。
     func testToggleFlipsVariableOnTrigger() {
         let toggle = floatNode(.toggle, NodeParams(key: "cursorLocked"))
-        // 初始无值 → false → true
-        _ = exec(toggle, inputs: ["trigger": .unit()])
-        XCTAssertEqual(state["cursorLocked"]?.boolValue, true)
-        // 再 toggle → false
-        _ = exec(toggle, inputs: ["trigger": .unit()])
-        XCTAssertEqual(state["cursorLocked"]?.boolValue, false)
-        // 无 trigger → 不翻转
-        _ = exec(toggle)
-        XCTAssertEqual(state["cursorLocked"]?.boolValue, false)
+        // 初始无值 → 应请求写入 true
+        let first = exec(toggle, inputs: ["trigger": .unit()])
+        XCTAssertEqual(first.writes.count, 1)
+        XCTAssertEqual(first.writes.first?.key, "cursorLocked")
+        XCTAssertEqual(first.writes.first?.value.boolValue, true)
+        XCTAssertNil(state["cursorLocked"], "执行器不得直接写 state")
+        // 无 trigger → 不产生写请求
+        let none = exec(toggle)
+        XCTAssertTrue(none.writes.isEmpty)
     }
 
     // MARK: - Predicate 求值

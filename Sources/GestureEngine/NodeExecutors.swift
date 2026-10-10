@@ -384,19 +384,25 @@ public enum NodeExecutors {
 
         // MARK: 变量操作（外部状态变量 + 通用操作，替代专有行为卡片）
 
-        /// set：trigger 脉冲时把 value 写入 state[key]（如 cursorLocked=1）
+        /// set：trigger 脉冲时把 value 写入 state[key]（如 cursorLocked=1）。
+        /// **不得在此直接写 state**——第一遍写入会让同帧后续节点读到新值，违反摩尔语义
+        /// （GraphEvaluator 声明"写值下一帧生效"）。改为返回写请求，由第二遍收集、帧尾统一 flush。
         case .set:
             guard required(inputs, "trigger") != nil,
                   let v = required(inputs, "value") else { return invalidOutputs(node) }
-            state[p.key ?? "var"] = v.value
-            return output(node, .unit())
-        /// toggle：trigger 脉冲时对 state[key] 取反（bool）
+            var setResult = output(node, .unit())
+            setResult.writes = [(p.key ?? "var", v.value)]
+            return setResult
+        /// toggle：trigger 脉冲时对 state[key] 取反（bool）。
+        /// 同 .set：返回写请求而非直接写 state。原实现在第一遍写一次、第二遍再排一次取反，
+        /// 帧尾 flush 后净效果等于原值 → **toggle 永远不生效**（静默空操作）。
         case .toggle:
             guard required(inputs, "trigger") != nil else { return invalidOutputs(node) }
             let key = p.key ?? "var"
             let current = state[key]?.boolValue ?? false
-            state[key] = .bool(!current)
-            return output(node, .unit())
+            var toggleResult = output(node, .unit())
+            toggleResult.writes = [(key, .bool(!current))]
+            return toggleResult
 
         // MARK: 流控制
 

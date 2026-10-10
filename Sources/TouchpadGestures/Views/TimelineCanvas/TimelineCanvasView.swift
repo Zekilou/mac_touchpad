@@ -398,12 +398,14 @@ struct TimelineCanvasView: View {
         }
     }
 
-    /// 拖拽结束提交：屏幕像素总位移 → 画布坐标，一次性写入数据（拖动中不写数据 → 不抖动）
-    private func commitDrag(_ total: CGSize) {
+    /// 拖拽结束提交：一次性写入数据（拖动中不写数据 → 不抖动）。
+    /// - Parameter canvasTotal: **画布坐标**总位移（调用方已把屏幕像素 /zoom 归一化）。
+    ///   此处绝不能再除一次 zoom——否则缩放 ≠1 时松手瞬间节点跳到 1/zoom 倍距离。
+    private func commitDrag(_ canvasTotal: CGSize) {
         guard let id = dragState.nodeID,
               let idx = timeline.nodes.firstIndex(where: { $0.id == id }) else { return }
-        timeline.nodes[idx].x += Double(total.width / zoom)
-        timeline.nodes[idx].y += Double(total.height / zoom)
+        timeline.nodes[idx].x += Double(canvasTotal.width)
+        timeline.nodes[idx].y += Double(canvasTotal.height)
         selectedNodeIDs = [id]
     }
 
