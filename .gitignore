@@ -20,9 +20,6 @@ DerivedData/
 # 打包脚本的输出目录（scripts/build_app.sh 会在此生成 .app / .dmg / dmg_staging）
 dist/
 
-# 研究用一次性产物（探针程序与私有框架 dump 留在本地，不入库）
-docs/research/probe_*.c
-
 # IDE
 .vscode/
 .idea/
