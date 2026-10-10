@@ -78,8 +78,17 @@ static void mt_internal_touch_cb(void *device,
                                  void *user_data /* 保留，实际我们用全局 g_user_data */)
 {
     (void)user_data;
-    if (g_user_cb) {
-        g_user_cb((mt_device_t)device, touches, n_fingers, timestamp, frame, g_user_data);
+    /* n_fingers 来自逆向的私有回调签名，必须在最靠近源头处钳制：
+       负值/超大值/空指针会在 Swift 侧变成越界读与无界分配。
+       触控板物理上限远小于 MT_MAX_FINGERS（32）。 */
+    if (!touches || n_fingers <= 0 || n_fingers > MT_MAX_FINGERS) {
+        return;
+    }
+    /* 同一份 (cb, user_data) 快照：避免读取期间被 mt_stop_touch 改成 cb 非空但 data 为 NULL */
+    mt_touch_cb_t cb = g_user_cb;
+    void *data = g_user_data;
+    if (cb) {
+        cb((mt_device_t)device, touches, n_fingers, timestamp, frame, data);
     }
 }
 
@@ -354,11 +363,15 @@ int mt_start_touch(mt_device_t dev, mt_touch_cb_t cb, void *user_data)
 
 void mt_stop_touch(mt_device_t dev)
 {
+    /* 先摘掉回调再停设备：MTDeviceStop 返回后仍可能有已在飞行中的帧到达回调，
+       若先停设备后清 cb，那段窗口里回调仍会带着旧 user_data 进入 Swift 侧。
+       先置 NULL 可让任何迟到帧在 mt_internal_touch_cb 的 cb 检查处直接丢弃。
+       （注意：pMTDeviceStop 本身是同步调用，这里不引入额外阻塞。） */
+    g_user_cb   = NULL;
+    g_user_data = NULL;
     if (g_initialized && dev) {
         pMTDeviceStop(dev);
     }
-    g_user_cb   = NULL;
-    g_user_data = NULL;
 }
 
 /* ---------------------------------------------------------------------------

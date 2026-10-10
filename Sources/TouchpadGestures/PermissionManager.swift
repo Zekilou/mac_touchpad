@@ -109,7 +109,10 @@ final class PermissionManager: ObservableObject {
 
     /// 请求 Accessibility 权限（触发系统弹窗）
     func requestAccessibility() {
-        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true]
+        // kAXTrustedCheckOptionPrompt 是框架拥有的全局常量（非 +1 引用）：
+        // 用 takeRetainedValue() 会转移本不属于我们的所有权 → 过度释放。
+        // 正确做法是 takeUnretainedValue()。
+        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true]
         _ = AXIsProcessTrustedWithOptions(options)
     }
 
@@ -137,11 +140,14 @@ final class PermissionManager: ObservableObject {
     /// 触控板读取（走 MultitouchSupport 私有框架，不受 TCC 输入监控门控），故不再请求，
     /// 避免误导用户以为必须授权。
     func autoResetAndReprompt() {
-        resetTCC(service: "Accessibility")
-        requestAccessibility()
-        // 给系统弹窗/授权落地留一点时间后再刷新状态（否则仍读到旧值）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.refresh()
+        // 顺序修正：必须等 tccutil 真正执行完再请求授权，否则弹窗可能发生在旧记录
+        // 尚未清除时，授权又落到旧记录上（重置白做）。故用 terminationHandler 串行化。
+        resetTCC(service: "Accessibility") { [weak self] in
+            self?.requestAccessibility()
+            // 给系统弹窗/授权落地留一点时间后再刷新状态（否则仍读到旧值）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.refresh()
+            }
         }
     }
 
@@ -152,16 +158,16 @@ final class PermissionManager: ObservableObject {
         }
     }
 
-    /// 启动后若权限仍未授予，延迟一小段时间自动执行一次自愈（每个进程最多一次）。
-    /// 延迟是为了让用户/系统完成首个授权弹窗，避免误清刚授予的正常授权。
-    private var hasScheduledAutoReset = false
-    func scheduleAutoResetIfNeeded() {
-        guard !hasScheduledAutoReset else { return }
-        hasScheduledAutoReset = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self, !self.allGranted else { return }
-            self.autoResetAndReprompt()
-        }
+    /// 启动时**只申请权限，绝不自动重置 TCC**。
+    ///
+    /// 原实现（`scheduleAutoResetIfNeeded`）在启动 3s 后只要权限未授予就无条件执行
+    /// `tccutil reset Accessibility`——这会**摧毁用户已经授予的授权记录**并重新弹窗，
+    /// 权限未生效时每次启动都循环一次，属于未经同意的破坏性操作。
+    ///
+    /// 现在自动路径只申请（幂等、无副作用）；「重置授权」保留为设置页的**显式**操作
+    /// （见 ConfigView 的按钮 → `autoResetAndReprompt()`），由用户主动触发。
+    func requestPermissionsOnLaunch() {
+        requestRequiredPermissions()
     }
 
     private var bundleID: String {
@@ -169,12 +175,24 @@ final class PermissionManager: ObservableObject {
     }
 
     /// 执行 `tccutil reset <service> <bundleID>`（清掉 TCC 里针对该 bundleID 的授权记录）。
-    private func resetTCC(service: String) {
+    /// **只在用户显式点击「重置授权」时调用**。
+    /// 不再 `waitUntilExit()` 阻塞主线程——tccutil 起停可能耗时数百毫秒，
+    /// 阻塞主线程会让设置窗口卡住；改为 terminationHandler 异步收尾。
+    private func resetTCC(service: String, completion: (() -> Void)? = nil) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
         task.arguments = ["reset", service, bundleID]
-        try? task.run()
-        task.waitUntilExit()
+        if let completion {
+            task.terminationHandler = { _ in
+                DispatchQueue.main.async { completion() }
+            }
+        }
+        do {
+            try task.run()
+        } catch {
+            fputs("[Permission] tccutil 启动失败：\(error)\n", stderr)
+            DispatchQueue.main.async { completion?() }   // 失败也要继续后续流程，避免卡死
+        }
     }
 
     // MARK: - 便捷属性

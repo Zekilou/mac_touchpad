@@ -292,15 +292,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         // 权限请求：仅请求本 app 真正必需的「辅助功能」。
         // 「输入监控」是可选项——触控板读取走 MultitouchSupport 私有框架，不受 TCC 输入监控门控；
         // 主动请求它只会弹窗误导用户，故不再请求/不再把它当功能前提。
-        permissionManager.requestRequiredPermissions()
+        permissionManager.requestPermissionsOnLaunch()
         // 辅助功能授权后自动重试触控板初始化（无需重启 app）
         permissionManager.onAccessibilityGranted = { [weak self] in
             self?.setupTrackpad()
         }
 
-        // ③ 权限异常自愈：若启动后权限仍未授予（含「已允许但未生效」的多副本匹配问题），
-        //   延迟 3s 自动 tccutil 清旧授权并重新请求——否则授权可能一直落在错误的副本/随机路径上。
-        permissionManager.scheduleAutoResetIfNeeded()
+        // 注意：**不再在启动时自动执行 tccutil reset**。原实现在权限未授予时无条件清除
+        // 用户已授予的 TCC 记录并重新弹窗（未同意的破坏性操作，权限未生效时每次启动循环）。
+        // 「重置授权」现为设置页的显式按钮（ConfigView → autoResetAndReprompt()）。
 
         setupTrackpad()
     }
@@ -560,7 +560,11 @@ private let touchCallback: @convention(c) (
     guard let userData = userData else { return }
     let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
     var touchArray: [mt_touch_t] = []
-    if let touches = touches, n > 0 {
+    // n 来自逆向的私有回调签名，必须钳制：
+    // 布局漂移、负值或 teardown 期间的杂散帧都会让 0..<n 越界读并做出无界分配。
+    // 触控板物理上限远小于 32；超出即视为异常帧丢弃。
+    if let touches = touches, n > 0, n <= 32 {
+        touchArray.reserveCapacity(Int(n))
         for i in 0..<Int(n) { touchArray.append(touches[i]) }
     }
     delegate.engine.onTouchFrame(touches: touchArray)
