@@ -70,6 +70,23 @@ public enum SystemControl {
     private static var lastKeyTime: Double = 0
     private static let keyInterval = 0.02   // 两次按键最小间隔 20ms（上限 50 键/s）
 
+    /// 读取物理键盘当前的修饰符。
+    ///
+    /// **绝不能用 `DispatchQueue.main.sync`**：本函数在引擎 tick 线程上被调用，
+    /// 而主线程会经 `GestureEngine.stop()` / `debugPhases()` 执行 `tickQueue.sync`
+    /// → 主等 tick、tick 等主，**退出/重试时永久死锁**（滑动调节中触发即复现）。
+    ///
+    /// 改用 `CGEventSource.flagsState`：可安全地在任意线程调用，无需切主线程。
+    /// 其标准修饰符位与 `NSEvent.ModifierFlags` 完全一致（已实测 shift/control/option/
+    /// command/function 五个位逐一相等），故直接按 rawValue 映射。
+    private static func currentPhysicalModifiers() -> NSEvent.ModifierFlags {
+        let cg = CGEventSource.flagsState(.combinedSessionState)
+        // 只保留标准修饰符位，避免 CGEvent 的私有/设备位泄进媒体键掩码
+        let standard: CGEventFlags = [.maskShift, .maskControl, .maskAlternate,
+                                      .maskCommand, .maskSecondaryFn]
+        return NSEvent.ModifierFlags(rawValue: UInt(cg.intersection(standard).rawValue))
+    }
+
     /// 发送系统媒体键事件（NX_SYSDEFINED, subtype=8）
     /// 这会让系统自动调节音量/亮度并显示右上角 HUD
     /// 需要「辅助功能」权限（Accessibility）
@@ -79,14 +96,7 @@ public enum SystemControl {
         lastKeyTime = now
         // 物理键盘当前真正按下的修饰符：让 ⌥⇧+音量（精确 1/4 档）、Shift+音量（静音等）
         // 等系统原生组合在触控板触发时同样生效。
-        // 注意：NSEvent.modifierFlags 必须在主线程读，否则返回空集合；
-        // 媒体键由引擎 tick 线程（非主）调用，所以同步切主线程取一次。
-        let physicalFlags: NSEvent.ModifierFlags
-        if Thread.isMainThread {
-            physicalFlags = NSEvent.modifierFlags
-        } else {
-            physicalFlags = DispatchQueue.main.sync { NSEvent.modifierFlags }
-        }
+        let physicalFlags = currentPhysicalModifiers()
         // data1 格式: (keyType << 16) | (keyState << 8) | keyRepeat
         // keyState: 0x0A = keyDown, 0x0B = keyUp
         // NSEvent.ModifierFlags(rawValue: 0xA00/0xB00) 是媒体键的私有掩码（非标准修饰符），

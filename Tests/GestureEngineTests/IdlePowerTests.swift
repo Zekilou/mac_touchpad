@@ -214,4 +214,59 @@ final class IdlePowerTests: XCTestCase {
 
         engine.stop()
     }
+
+    // MARK: - ④ 生命周期：stop 与迟到触摸帧的竞态
+
+    /// 回归：`stop()` 期间/之后到达的触摸帧不得再驱动 tick。
+    /// 原实现把 eventBoxes/runtimes 清理放在 syncOnTickQueue 之外，且 pump() 无 started 守卫
+    /// → 迟到的 onTouchFrame 块会与清理并发读写同一批字典（内存破坏）。
+    /// 这里在「手指刚落下的瞬间」反复 stop，并穿插喂帧，验证不崩且状态干净。
+    func testStopDuringActiveTouchesIsRaceFree() {
+        for _ in 0..<20 {
+            let engine = makeEngine()
+            // 制造活跃触摸（可能进入识别/holding 链）
+            engine.onTouchFrame(touches: [touch(0.92, 0.5, state: 3)])
+            engine.onTouchFrame(touches: [touch(0.92, 0.5, state: 4)])
+            // 立刻 stop（此时 tickQueue 上很可能仍有排队的回调块）
+            engine.stop()
+            XCTAssertFalse(engine.isRunning, "stop 后 isRunning 必须为 false")
+            XCTAssertEqual(engine.holdingCount, 0, "stop 必须清空 holding 计数")
+            XCTAssertNil(engine.currentHoldingGestureName, "stop 必须清空 holding 手势名")
+            // stop 之后喂帧：不得崩溃、不得复活引擎
+            engine.onTouchFrame(touches: [touch(0.92, 0.6, state: 4)])
+            Thread.sleep(forTimeInterval: 0.02)
+            XCTAssertFalse(engine.isRunning, "stop 后到达的触摸帧不得重新启动引擎")
+            engine.stop()   // 幂等
+        }
+    }
+
+    /// 回归：stop → start 可以安全重启，且重启后仍能正常进入 holding。
+    func testStopThenRestartRecoversCleanly() {
+        let engine = makeEngine()
+        engine.stop()
+        XCTAssertFalse(engine.isRunning)
+
+        engine.start()
+        XCTAssertTrue(engine.isRunning, "start 后应恢复运行")
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let x: Float = 0.92
+        func frame(_ t: [mt_touch_t], wait: Double = 0.012) {
+            engine.onTouchFrame(touches: t)
+            Thread.sleep(forTimeInterval: wait)
+        }
+        frame([touch(x, 0.5, state: 3)])
+        frame([touch(x, 0.5, state: 4)])
+        frame([touch(x, 0.5, state: 7)])
+        frame([], wait: 0.15)
+        frame([touch(x, 0.5, state: 3)])
+        // 轮询等待 holding 成立（固定睡 0.45s 在负载机器上会偶发未达，属测试自身的不确定性）
+        let deadline = Date().addingTimeInterval(1.5)
+        while Date() < deadline && engine.holdingCount == 0 {
+            frame([touch(x, 0.5, state: 4)])
+        }
+
+        XCTAssertGreaterThan(engine.holdingCount, 0, "重启后手势链应仍能正常进入 holding")
+        engine.stop()
+    }
 }

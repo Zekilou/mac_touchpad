@@ -123,6 +123,33 @@ final class NodeExecutorsTests: XCTestCase {
         XCTAssertEqual(r.outputs?["tick"]?.outputValue, .continuous(delta: -1.0))
     }
 
+    /// 回归：stepNorm 极小值不得让 Int(floor(...)) 溢出而崩溃。
+    /// 原实现只判 `stepNorm > 0`，stepNorm=1e-30 时 (absAcc+eps)/stepNorm ≈ 1e25 → trap。
+    func testQuantizeTinyStepNormDoesNotTrap() {
+        let node = floatNode(.quantize, NodeParams(stepNorm: 1e-30, triggerMode: .discrete))
+        let r = exec(node, inputs: ["value": .float(0.05)])
+        // 不崩即通过；步长被钳到下限后仍应产出有效 tick
+        XCTAssertNotNil(r.outputs)
+    }
+
+    /// 回归：NaN/Inf 输入不得让量化器崩溃，且不得把非有限值写回累积状态。
+    func testQuantizeNonFiniteInputIsRejected() {
+        let node = floatNode(.quantize, NodeParams(stepNorm: 0.02, triggerMode: .discrete))
+        let r = exec(node, inputs: ["value": .float(.infinity)])
+        XCTAssertEqual(r.outputs?["tick"], .invalid(), "Inf 输入应按未达刻度处理，而不是崩溃")
+        // 累积状态必须被复位为非有限之外的可恢复值（0），否则后续帧持续污染
+        let accum = state["quantize.accum.\(node.id)"]?.floatValue
+        XCTAssertNotNil(accum)
+        XCTAssertTrue(accum!.isFinite, "累积状态不得保留 Inf/NaN")
+    }
+
+    /// 回归：stepNorm 为 NaN 时退回默认步长而非崩坏。
+    func testQuantizeNaNStepNormFallsBackToDefault() {
+        let node = floatNode(.quantize, NodeParams(stepNorm: .nan, triggerMode: .discrete))
+        let r = exec(node, inputs: ["value": .float(0.05)])
+        XCTAssertNotNil(r.outputs)
+    }
+
     /// gate 输出 pass 布尔（不是阻塞链）
     func testGateOutputsBool() {
         let node = floatNode(.gate, NodeParams(comparator: .gte, threshold: 0.5))

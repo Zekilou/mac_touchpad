@@ -238,12 +238,21 @@ public enum NodeExecutors {
                 return invalidOutputs(node)
             }
             let mode = p.triggerMode ?? .discrete
-            let stepNorm = p.stepNorm ?? 0.02
+            // stepNorm 是用户可编辑参数（画布检查器无约束 / 手改 config.json）：
+            // 钳到合理下限，避免极小值让 (absAcc+eps)/stepNorm 溢出 Int 转换而 trap
+            // （原实现只判 > 0，stepNorm=1e-30 时 Int(floor(1e25)) 直接崩）。
+            let rawStep = p.stepNorm ?? 0.02
+            let stepNorm = rawStep.isFinite ? min(max(rawStep, 1e-4), 1e3) : 0.02
             let key = "quantize.accum.\(node.id)"
             // 跨帧累积（discrete 关键）：滑动中每帧位移常 < stepNorm，若每帧独立量化则
             // 慢速连续滑动永不 tick（v8 图化重构退化 bug）。累积位移 + 触发后扣减 + 余量保留，
             // 与 v1 引擎 lastTriggerValue += tickCount×stepNorm 语义一致。
-            let acc = (state[key]?.floatValue ?? 0) + v
+            var acc = (state[key]?.floatValue ?? 0) + v
+            // 累积值同样可能被上游 inf/NaN 污染（scale/arith 放大用户输入的极端参数）→ 复位重来
+            if !acc.isFinite {
+                state[key] = .float(0)
+                return invalidOutputs(node)
+            }
             if mode == .continuous {
                 let sens = p.sensitivity ?? 1.0
                 guard abs(acc * sens) > 1e-6 else { return invalidOutputs(node) }
@@ -254,14 +263,23 @@ public enum NodeExecutors {
                 log("quantize[\(node.title)] in=\(v) -> \(out)")
                 return output(node, .output(out))
             }
+            // 非 finite 已在上方拦下；此处再做一次上限兜底，保证 Int 转换安全
             let absAcc = abs(acc)
             let eps = max(stepNorm * 0.005, 1e-5)
-            guard absAcc >= stepNorm - eps, stepNorm > 0 else {
+            guard absAcc >= stepNorm - eps else {
                 state[key] = .float(acc)   // 未到刻度：余量保留，下一帧继续累积
                 if abs(acc) > 1e-6 { log("quantize[\(node.title)] acc=\(acc) -> 未达刻度") }
                 return invalidOutputs(node)
             }
-            let tickCount = Int(floor((absAcc + eps) / stepNorm))
+            let rawTicks = (absAcc + eps) / stepNorm
+            // 理论上限：absAcc 已 finite 且 stepNorm ≥ 1e-4 → 至多 ~1e7 级；仍显式设防，
+            // 任何异常值一律按"未达刻度"处理而不是崩溃
+            guard rawTicks.isFinite, rawTicks < 1e9 else {
+                acc = 0
+                state[key] = .float(acc)
+                return invalidOutputs(node)
+            }
+            let tickCount = Int(floor(rawTicks))
             guard tickCount >= 1 else {
                 state[key] = .float(acc)
                 return invalidOutputs(node)

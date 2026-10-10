@@ -56,10 +56,37 @@ public final class GestureEngine {
         var graph: TimelineConfig
     }
     private var runtimes: [UUID: Runtime] = [:]
+    /// holding 展示状态的锁：在 tickQueue 上写、主线程（设置页/UI）读。
+    /// 尤其 `String?` 的并发读写会产生 retain/release 竞争（罕见崩溃），故统一加锁。
+    private let holdingLock = NSLock()
+    private var _holdingCount = 0
+    private var _currentHoldingGestureName: String?
     /// 当前有手势在 holding（phase 变量 == 4）
-    private(set) var holdingCount = 0
+    var holdingCount: Int {
+        get {
+            holdingLock.lock()
+            defer { holdingLock.unlock() }
+            return _holdingCount
+        }
+        set {
+            holdingLock.lock()
+            _holdingCount = newValue
+            holdingLock.unlock()
+        }
+    }
     /// 当前 holding 的手势名（UI 显示）
-    public private(set) var currentHoldingGestureName: String?
+    var currentHoldingGestureName: String? {
+        get {
+            holdingLock.lock()
+            defer { holdingLock.unlock() }
+            return _currentHoldingGestureName
+        }
+        set {
+            holdingLock.lock()
+            _currentHoldingGestureName = newValue
+            holdingLock.unlock()
+        }
+    }
     /// 每手势的事件引用（key = gesture.id；consume 的 trackedValue 跨帧保留）。
     /// per-gesture（v10.20 修复）：原单一 eventBox 被多手势共享，两只手同时在不同边缘
     /// holding 时后进入的手势会消费前一手势的事件 → 调节错对象 + trackedValue 写回串台
@@ -111,8 +138,7 @@ public final class GestureEngine {
     private var lastWall: Double = 0
     private var tickAccum: Double = 0
     private var lastTouchWall: Double = 0
-    private var started = false
-    /// 引擎帧循环是否在运行（设置页「引擎状态」显示用；计算属性只读，无需 private(set)）
+    /// 引擎帧循环是否在运行（设置页「引擎状态」显示用）。定义见下方 started 访问器。
     public var isRunning: Bool { started }
     private static let tickInterval = 1.0 / 120.0
     /// 防追赶螺旋：一次间隔超过该值（挂起/休眠/长停顿）直接丢弃，不补跑（Godot 同样忽略超长 delta）
@@ -145,6 +171,23 @@ public final class GestureEngine {
         }
     }
 
+    /// 引擎是否在运行：读写都可能跨线程（start/stop 在主线程，pump/回调在 tickQueue），
+    /// 故用锁保护，避免裸 Bool 的数据竞争。
+    private let startedLock = NSLock()
+    private var startedFlag = false
+    private var started: Bool {
+        get {
+            startedLock.lock()
+            defer { startedLock.unlock() }
+            return startedFlag
+        }
+        set {
+            startedLock.lock()
+            startedFlag = newValue
+            startedLock.unlock()
+        }
+    }
+
     /// 启动固定步长帧循环（mt_start_touch 之后调用）
     public func start() {
         guard !started else { return }
@@ -157,29 +200,38 @@ public final class GestureEngine {
         timer = t
     }
 
+    /// 停止帧循环并清理 holding 状态。
+    ///
+    /// **竞态修复**：`timer.cancel()` 是异步的，不会排空已入队的 `onTouchFrame` 块，
+    /// 也不会中断正在执行的 `processTick`。原实现把 `eventBoxes.removeAll` / `runtimes`
+    /// 遍历 / `holdingCount=0` 放在 tickQueue **之外**执行，会在迟到的 pump 并发 insert
+    /// 同一批字典时造成内存破坏（"手指刚落下时点退出/重试"是正常操作路径）。
+    /// 现在：① 先置 started=false（此后所有 pump/回调块立即早退）；
+    ///       ② 全部状态清理放进 syncOnTickQueue，与 tick 严格串行。
     public func stop() {
         guard started else { return }
-        started = false
+        started = false           // 必须先置位：让迟到的 pump/回调块在第一道守卫处返回
         timer?.cancel()
         timer = nil
-        // 复位帧循环状态（重启后从全速时钟 + 干净累积器开始）。
-        // 用 syncOnTickQueue：调用方通常是主线程，但从 tickQueue 内调用也不会自锁死。
         syncOnTickQueue {
+            // 复位帧循环状态（重启后从全速时钟 + 干净累积器开始）
             self.idleSlowed = false
             self.pendingTouch = false
             self.tickAccum = 0
             self.lastWall = 0
+            // 清理 holding 状态（重启后不残留旧 eventBox/trackedValue/wasHolding）
+            self.eventBoxes.removeAll(keepingCapacity: true)
+            self.effects.eventBox = nil
+            for (id, var rt) in self.runtimes {
+                rt.wasHolding = false
+                self.runtimes[id] = rt
+            }
+            self.holdingCount = 0
+            self.currentHoldingGestureName = nil
+            // restoreMouse 也放进同步块：mouseDisassociated/lockedCursorPos 与
+            // syncCursorLock（tick 内）是同一组状态，跨线程访问会让鼠标锁定状态错乱
+            self.restoreMouse()
         }
-        // 清理 holding 状态（重启后不残留旧 eventBox/trackedValue/wasHolding）
-        eventBoxes.removeAll(keepingCapacity: true)
-        effects.eventBox = nil
-        for (id, var rt) in runtimes {
-            rt.wasHolding = false
-            runtimes[id] = rt
-        }
-        holdingCount = 0
-        currentHoldingGestureName = nil
-        restoreMouse()
     }
 
     /// MT 回调入口（任意线程）：只更新最新触摸快照 + 记录快照时刻，不驱动逻辑。
@@ -190,7 +242,7 @@ public final class GestureEngine {
         lastTouchWall = ProcessInfo.processInfo.systemUptime
         touchesLock.unlock()
         tickQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.started else { return }   // stop() 后到达的迟到帧直接丢弃
             // 触摸到达 = 可能要做识别/滑动 → 立刻脱离空载慢速（不能等下一次定时器唤醒）。
             // 只在 tickQueue 上改 idleSlowed/pendingTouch，避免与 pump 竞争
             self.pendingTouch = true
@@ -208,6 +260,9 @@ public final class GestureEngine {
     ///   且无 holding 时，不存在任何待处理的时间驱动转移，丢弃中间的 1/120 细分不会漏掉事件。
     /// - **活跃全速**：正常累积器，按固定 1/120 步长补跑，保证交互期计时确定。
     private func pump() {
+        // stop() 之后仍可能有已排队的定时器唤醒/回调块到达：此处是最后一道守卫，
+        // 确保它们不会在 runtimes/eventBoxes 已被清理后继续执行 processTick。
+        guard started else { return }
         let wall = ProcessInfo.processInfo.systemUptime
         if lastWall == 0 {
             lastWall = wall
