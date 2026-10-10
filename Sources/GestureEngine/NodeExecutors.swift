@@ -479,6 +479,17 @@ public enum NodeExecutors {
         forceLogLast = -.infinity
     }
 
+    /// 淘汰已不存在节点的跨帧状态（防无界增长）。
+    /// 这些字典按 node.id 累积，而粘贴/新建节点每次生成新 UUID，长期编辑会话会持续增长；
+    /// 已删除节点的残留边沿状态还可能在 id 复用时产生错误的 down/up 判定。
+    /// - Parameter keeping: 当前图中仍存在的节点 id 集合
+    public static func pruneRuntime(keeping live: Set<UUID>) {
+        fingerStates = fingerStates.filter { live.contains($0.key) }
+        fingerLastPresent = fingerLastPresent.filter { live.contains($0.key) }
+        upSatisfied = upSatisfied.filter { live.contains($0.key) }
+        fingerPresent = fingerPresent.filter { live.contains($0.key) }
+    }
+
     /// finger：输入原始帧 → 按下/抬起边沿脉冲 + 存在状态 + 手指信号 + 身份
     /// 卡片内参数：touchSizeMin/Max（面积过滤）；region 输入可选（区域过滤）
     private static func runFinger(_ node: NodeConfig, inputs: [String: SocketValue],

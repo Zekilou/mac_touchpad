@@ -464,6 +464,7 @@ public final class GestureEngine {
         // 单次快照：整帧统一用同一份 config（避免多次 getter 之间主线程替换 config →
         // 旧快照索引越界；写入走 mutateConfig 锁内原子，见退出分支）
         let cfg = config
+        pruneStaleRuntimeState(cfg)
         for gesture in cfg.gestures where gesture.enabled {
             // 绑定从图上 RegionRef/EventRef 节点读取（旧文件回退顶层字段）
             guard let regionID = gesture.boundRegionID,
@@ -583,8 +584,38 @@ public final class GestureEngine {
         return rt
     }
 
-    private func rawSignals(of t: mt_touch_t?) -> [SignalSource: Float] {
-        guard let t else { return [:] }
+    // MARK: - 运行时状态淘汰（防无界增长）
+
+    /// 上一帧见过的全部节点 id 指纹（用于"节点集合未变则跳过淘汰"的快路径）。
+    /// 只在节点集合变化时（增删手势/节点、粘贴、自动整理）才真正做清理。
+    private var lastKnownNodeIDs: Set<UUID>?
+
+    /// 淘汰已不存在的手势/节点运行态：
+    /// - `runtimes` / `eventBoxes` 原先只增不减，用户每删一个手势就永久留下一个
+    ///   `Runtime`（内含整份 TimelineConfig 深拷贝）；
+    /// - `NodeExecutors` 的四个静态字典按 node.id 累积，粘贴节点每次生成新 UUID。
+    /// 归属关系：finger 节点的静态状态由该节点所在手势的节点集合决定，故一并按同一集合清理。
+    /// 仅在集合变化时执行，避免每帧构造 Set 的开销。
+    private func pruneStaleRuntimeState(_ cfg: AppConfig) {
+        var currentNodeIDs = Set<UUID>()
+        for gesture in cfg.gestures {
+            for node in gesture.timeline.allNodes {
+                currentNodeIDs.insert(node.id)
+            }
+        }
+        if let last = lastKnownNodeIDs, last == currentNodeIDs { return }
+        lastKnownNodeIDs = currentNodeIDs
+
+        let liveGestureIDs = Set(cfg.gestures.map(\.id))
+        for id in runtimes.keys where !liveGestureIDs.contains(id) {
+            runtimes[id] = nil
+            eventBoxes[id] = nil
+        }
+        // finger 节点静态状态按节点 id 淘汰（已删除节点的残留边沿状态）
+        NodeExecutors.pruneRuntime(keeping: currentNodeIDs)
+    }
+
+    private func rawSignals(of t: mt_touch_t?) -> [SignalSource: Float] {        guard let t else { return [:] }
         return [.normY: t.norm_y, .normX: t.norm_x, .size: t.size, .pressure: t.zPressure,
                 .velX: t.vel_x, .velY: t.vel_y]
     }

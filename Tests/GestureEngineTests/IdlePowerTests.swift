@@ -273,4 +273,48 @@ final class IdlePowerTests: XCTestCase {
         XCTAssertGreaterThan(engine.holdingCount, 0, "重启后手势链应仍能正常进入 holding")
         engine.stop()
     }
+
+    // MARK: - ⑤ 运行时状态淘汰（防无界增长）
+
+    /// 回归：删除手势后，其 Runtime（内含整份 TimelineConfig 深拷贝）必须被淘汰。
+    /// 原实现 runtimes 只增不减 → 每次删手势都永久泄漏一份图。
+    /// 同时验证：淘汰不能影响仍在配置中的手势（曾出现的"误删活跃手势"风险）。
+    func testDeletingGestureReleasesItsRuntime() {
+        // 关闭自动补齐，构造一个可控的两手势配置
+        var cfg = ConfigStore.loadDefault()
+        cfg.gestures = [cfg.gestures[0]]
+
+        ConfigStore.save(cfg)
+        let engine = GestureEngine()
+        engine.config = cfg
+        engine.start()
+        defer { engine.stop() }
+
+        // 让两个手势都建立 runtime。
+        // 注意：空载时引擎会跳过整图求值（runtimes 不会建立），必须喂一帧活动触摸
+        // 才能进入 processTick —— 这也说明淘汰是"按需惰性"执行的。
+        func drive() {
+            engine.onTouchFrame(touches: [touch(0.5, 0.5, state: 4)])
+            Thread.sleep(forTimeInterval: 0.1)
+            engine.onTouchFrame(touches: [])
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+        var cfg2 = cfg
+        guard let baseGesture = cfg.gestures.first else { return XCTFail("缺少基础手势") }
+        var extra = baseGesture
+        extra.name = "临时手势"
+        cfg2.gestures.append(extra)
+        engine.config = cfg2
+        drive()
+
+        let withTwo = engine.debugPhases().count
+        XCTAssertGreaterThanOrEqual(withTwo, 2, "两个启用手势都应建立 runtime：\(engine.debugPhases())")
+
+        // 删掉临时手势 → 其 runtime 应被淘汰
+        engine.config = cfg
+        drive()
+        let phases = engine.debugPhases()
+        XCTAssertFalse(phases.keys.contains("临时手势"), "已删除手势的 runtime 必须被淘汰")
+        XCTAssertTrue(phases.keys.contains(baseGesture.name), "保留手势的 runtime 不得被误删")
+    }
 }
