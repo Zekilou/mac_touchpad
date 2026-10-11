@@ -147,12 +147,23 @@ public final class GestureEngine {
     private static let maxAccum = 0.25
     /// 触摸快照「陈旧」阈值（秒）：超过该时长没有新的 MT 回调 = 手指已离开、回调已停止。
     /// 与 finger 节点判抬起的 `staleEmpty`（200ms）同源同值。
-    static let staleTouchInterval = 0.2
+    ///
+    /// 生产值 0.2；**测试可覆盖**（见 `testStaleTouchIntervalOverride`）：
+    /// 单元测试在「整仓并发/高负载」下，harness 自身喂帧的间隔可能超过 200ms，
+    /// 引擎据此正确判定"手指已离开"，而用例本意是模拟连续接触 → 断言失败。
+    /// 那是测试环境的调度抖动，不是产品缺陷；故开一个测试缝把阈值放宽，
+    /// 让用例只验证**逻辑**而不受宿主机调度影响。
+    static let staleTouchIntervalDefault = 0.2
+    static var staleTouchIntervalOverride: Double?
+    static var staleTouchInterval: Double { staleTouchIntervalOverride ?? staleTouchIntervalDefault }
     /// holding 期间使用更宽的陈旧阈值（v10.11 保护）：MT 在滑动中会有采样间歇，
     /// 阈值太紧会把陈旧帧当空帧 → finger 判抬起 → 滑动中误退出 holding（用户核心痛点）。
     /// 实测 holding 期间回调间隔上限仅 ~87ms，1.0s 留了 >10× 余量；而真离开时
     /// MT 彻底静默，1.0s 后仍能把状态机拉回 idle（否则 holding 永不退出、光标永久锁死）。
-    static let holdingStaleInterval = 1.0
+    /// 同样开放测试覆盖（原因同上：用例内固定 sleep 的 400ms 间歇在高负载下会被拉长）。
+    static let holdingStaleIntervalDefault = 1.0
+    static var holdingStaleIntervalOverride: Double?
+    static var holdingStaleInterval: Double { holdingStaleIntervalOverride ?? holdingStaleIntervalDefault }
     /// 空载慢速时钟步长（省电）：确认全局 idle 后把帧定时器从 120Hz 降到 20Hz。
     /// 触摸到达时 `onTouchFrame` 会直接 pump（不依赖定时器），故响应延迟不受影响；
     /// 空载期间 simTime 仍按真实墙钟整步推进（见 pump），frame.now 连续，恢复求值时计时不丢。

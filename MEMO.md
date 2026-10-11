@@ -1,5 +1,51 @@
 # 项目备忘录
 
+## v2.1.0 发布记录（2026-10-10）
+
+**主题**：自定义触觉波形（新功能）+ 系统性缺陷排查与修复（P0/P1/P2 共 20 项）。
+
+版本号 `2.0.3 → 2.1.0`：中间位递增，因为本次含**新功能**（自定义波形）而非仅修复。
+自 v2.0.3 起共 9 个提交，49 文件变更（+11655/−305），测试从 222 增至 **242 全绿**。
+
+### 新功能
+- **自定义触觉波形**：新增「波形」一级页，可编辑包络（类型/幅度/时长）与音调
+  （类型/频率/幅度/时长/延迟）+ 力度乘法器（Light/Medium/Firm），实时预览试听。
+  走私有 `MTActuationCreateFromDictionary` + waveformID 83 宿主槽位下发；
+  私有符号缺失时自动回退预设波形（保证仍有震动）。
+
+### P0（日常可触发）
+- 节点拖动松手位置跳变：`commitDrag` 二次除以 zoom，缩放 ≠1 时跳 1/zoom 倍距离。
+- `.toggle` 节点静默空操作：第一遍写 + 第二遍再排取反，帧尾 flush 后净效果等于原值；
+  `.set` 同帧可见亦违反摩尔语义。改为统一返回写请求。
+- 配置静默重置：任何读取/解码失败都返回默认配置，随后被 UI 编辑覆写回真实文件。
+  现改为隔离备份 `config.corrupt-<ts>.json` + stderr 告警。
+- `save` 静默吞掉编码错误：`JSONEncoder` 对 NaN 抛错，而参数框接受 `"nan"` →
+  之后每次保存静默失效。现返回 Bool 并报错。
+- `Int(floor(...))` 溢出崩溃：`stepNorm=1e-30` 时 `1e25` 溢出 Int → trap。
+- 退出/重试永久死锁：tick 线程 `main.sync` ↔ 主线程 `tickQueue.sync`。改用
+  `CGEventSource.flagsState`（任意线程安全）。
+- `stop()` 竞态：清理在 tickQueue 外执行，与迟到回调并发读写同一批字典 → 内存破坏。
+
+### P1
+- 移除启动时自动 `tccutil reset`（会摧毁用户已授予的授权并循环弹窗）；改显式按钮。
+- `kAXTrustedCheckOptionPrompt` 过度释放；`tccutil` 阻塞主线程。
+- `build_app.sh`：`codesign ... | tail` 吞掉签名失败 → 打包未签名 app（加 `pipefail`）；
+  `cd` 提前；`mktemp` 替换写死的 `/tmp` 路径。
+- `n_fingers` 未钳制 → 越界读；C 侧源头钳制 + Swift 二次钳制。
+- 重复节点 id 崩溃：8 处 `Dictionary(uniqueKeysWithValues:)` 遇重复 key 直接 Fatal error。
+  根因修复：`TimelineConfig.sanitized()` 解码时去重 + 去悬空边（递归子图）。
+- `RegionConfig` 无 `xMin<=xMax` 不变量 → 手势静默失效。新增 `normalize()`。
+- 未知 `NodeType`/`Predicate` 降级改为**可见**（保留降级而非抛错：抛错会抹掉全部手势）。
+
+### P2
+- 配置写入防抖合并（300ms + 专用队列）：原先拖一个滑杆每帧同步落盘一次。
+- 运行时状态淘汰：`runtimes`/`eventBoxes` 与 finger 静态字典原为只增不减。
+- 文档修正：README 的 Swift 版本 badge、输入监控（实为可选）、下载物（DMG 非 zip）、
+  导航表缺波形页；`.gitignore` 补 `dist/` 与运行时配置。
+
+**验证**：`swift build` 0 error；`swift test` **242 tests / 0 failure**；
+`scripts/build_app.sh` 从项目外目录跑通，产出正确签名 app + DMG。
+
 ## 功耗优化：触摸结束后引擎永久 120Hz 满耗的根因修复（2026-10-10）
 
 **现象**：运行中的 debug 实例空载常驻 **33–52% CPU**（`top -l 8 -s 1` 连续 8 秒均 >33%），

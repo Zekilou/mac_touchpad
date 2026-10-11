@@ -460,7 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         try? task.run()
     }
 
-    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0.0" }
+    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.1.0" }
     var appBuild: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1" }
     var trackpadDeviceID: UInt64 { engine.deviceID }
     var trackpadDeviceCount: Int32 { deviceCount }
