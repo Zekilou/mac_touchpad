@@ -43,6 +43,8 @@ let package = Package(
         ),
 
         // SwiftUI 菜单栏 App（主产品）
+        // 错误上报（Diagnostics/）也在这个 target 内——它需要 AppKit/SwiftUI 上下文，
+        // 单测通过 @testable import 直接覆盖其中的纯逻辑（指纹/脱敏/请求构造/队列）。
         .executableTarget(
             name: "TouchpadGestures",
             dependencies: ["mt_bridge", "GestureEngine"],
@@ -52,8 +54,16 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreFoundation"),
+                .linkedFramework("CryptoKit"),
                 .linkedLibrary("dl")
             ]
+        ),
+
+        // 本地验收工具（起 HTTP 服务收客户端真实请求，校验上报契约）
+        .executableTarget(
+            name: "ReportProbe",
+            dependencies: ["GestureEngine"],
+            path: "Tools/ReportProbe"
         ),
 
         // 单元测试
@@ -61,6 +71,12 @@ let package = Package(
             name: "GestureEngineTests",
             dependencies: ["GestureEngine"],
             path: "Tests/GestureEngineTests"
+        ),
+
+        .testTarget(
+            name: "ReportTests",
+            dependencies: ["TouchpadGestures"],
+            path: "Tests/ReportTests"
         )
     ],
     swiftLanguageModes: [.v5]

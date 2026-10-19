@@ -226,11 +226,26 @@
 
 ## 数据与隐私
 
-- **无网络请求**：本 App 不联网，不收集、不上传任何数据
-- **本地存储**：配置仅保存在
-  `~/Library/Application Support/TouchpadGestures/{config,appsettings,default}.json`
+- **不会静默上传**：App 只在本地记录崩溃与错误；**任何一条报告都必须由你在弹窗里点「发送」才会离开这台机器**
+- **可关闭**：设置 →「反馈与诊断」→ 关闭「自动收集错误」后，连崩溃日志都不再记录
+- **发送前可预览**：报告窗口里能展开查看将要发送的日志原文，并逐项勾选（配置快照默认不发送）
+- **脱敏**：路径中的用户名收成 `~/`；不含主机名、序列号、IP、截图
+- **本地存储**：配置在
+  `~/Library/Application Support/TouchpadGestures/{config,appsettings,default}.json`；
+  待发报告在 `…/TouchpadGestures/Reports/`
 - **可随时重置**：设置页提供「重置全部」与「恢复代码默认值」
 - **诊断日志默认为关**：开启后写入 `/tmp/touchpad_run.log`，排障完成后建议关闭
+
+### 错误上报
+
+出错时会有一个**不抢焦点**的浮动窗口，列出捕获到的错误并询问是否发送。
+上报通道是 `https://debug.zeki.casa/touchpad-gestures/v1/report`：
+路径第一段是项目名，同一域名下的不同项目互不干扰。
+
+- 触发方式：崩溃后下次启动、运行中捕获的错误、菜单栏「报告问题…」、设置页「报告问题…」
+- 上传失败不会丢：报告留在本地，下次启动/联网自动重试
+- 不想联网：设置页仍可「导出诊断包…」，手动把文件夹发给开发者
+- 协议与字段定义见 [`docs/debug-upload-contract.md`](docs/debug-upload-contract.md)
 
 ---
 
@@ -286,8 +301,8 @@ swift test                     # 运行单元测试
 ### 打包分发包
 
 ```bash
-./scripts/build_app.sh               # 正式版（release，不含诊断模块）
-./scripts/build_app.sh dev           # 开发版（debug，含诊断模块）
+./scripts/build_app.sh               # 正式版（release）
+./scripts/build_app.sh dev           # 开发版（debug）
 ./scripts/build_app.sh dev 输出目录   # 指定输出目录
 ```
 
@@ -301,12 +316,16 @@ swift test                     # 运行单元测试
 | `mt_bridge` | MultitouchSupport C 桥接层 |
 | `TouchpadGestures` | SwiftUI 菜单栏 App（主产品） |
 | `TrackpadHIDTool` | 早期 IOKit 探索版本（保留作参考） |
-| `GestureEngineTests` | 单元测试 |
+| `ReportProbe` | 本地验收工具：起 HTTP 服务，校验客户端发出的上报是否符合契约 |
+| `GestureEngineTests` | 引擎单元测试 |
+| `ReportTests` | 上报模块单元测试 + 真实 HTTP 往返测试 |
 
 ### 诊断
 
 - **设置 → 诊断日志**：开启后实时写入 `/tmp/touchpad_run.log`，可用 `tail -f` 观察手指 / 量化 / 进入 holding 的数据流
-- **诊断模块**：仅 `#if DEBUG`（dev 构建）编译，包含崩溃捕获与诊断包导出；**正式版完全不含**
+- **错误上报**：正式版与开发版都包含（崩溃捕获、错误聚合、上传、诊断包导出）。
+  正式版与开发版的区别只在 `scope.channel` 字段（`release` / `dev`），便于在服务端区分来源。
+  旧的 `#if DEBUG` 诊断模块已并入 `Sources/TouchpadGestures/Diagnostics/`，不再是开发版独占。
 
 ---
 

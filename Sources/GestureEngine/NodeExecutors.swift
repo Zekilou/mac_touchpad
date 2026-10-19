@@ -13,9 +13,7 @@ public enum NodeExecutors {
     /// 诊断日志开关（GestureEngine 诊断模式开启；stderr + /tmp/touchpad_run.log，实证数据流断点）
     public static var debugLogging = false
     private static func log(_ msg: String) {
-        #if DEBUG
-        DiagnosticsLog.log(msg)   // 可插拔诊断：环形缓冲（导出诊断包用）
-        #endif
+        DiagnosticsLog.log(msg)   // 环形缓冲（上报模块 / 导出诊断包读取）
         guard debugLogging else { return }
         EngineLog.append("[ENGINE] \(msg)")
     }

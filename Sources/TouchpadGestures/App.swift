@@ -91,6 +91,7 @@ struct TouchpadGesturesApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject {
     let engine = GestureEngine()
     @Published var appSettings: AppSettings {
@@ -262,26 +263,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var retryMenuItem: NSMenuItem?
+    private var reportTrackpadItem: NSMenuItem?
+    /// 本实例是否安装了崩溃捕获（只有主实例为 true）
+    private var crashCatcherInstalled = false
     private var trackpadReady = false
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        #if DEBUG
-        CrashCatcher.install()   // 可插拔诊断：崩溃捕获（仅开发版；release 构建不含）
-        #endif
         NSApp.setActivationPolicy(appSettings.showInDock ? .regular : .accessory)
         applyAppIcon()
 
         // 单实例保护：已有实例在跑时退出本实例（避免重复双击 → 多个状态栏图标 / 多个引擎抢触控板）
+        // **必须在安装崩溃捕获之前**：install 会写会话标记，而本实例马上要 terminate，
+        // applicationWillTerminate 里的 markCleanExit 会删掉**正在运行的那个实例**的标记，
+        // 于是那边真崩溃时反而检测不到。第二实例不碰任何诊断文件。
         guard ensureSingleInstance() else {
             activateExistingInstance()
             NSApp.terminate(nil)
             return
         }
 
+        // 崩溃捕获进正式版：崩溃是最需要知道的信息，不能只在开发版有。
+        // 用户关掉「自动采集」时不安装（连会话标记都不写，避免后续反复追问）。
+        crashCatcherInstalled = ReportPrefs.isAutoCollectEnabled
+        CrashCatcher.install(enabled: crashCatcherInstalled)
+
         // 菜单栏图标必须先于触控板初始化创建——任何初始化失败都不能让应用"隐身"：
         // LSUIElement 无 Dock 图标，若 statusItem 未创建则进程无任何可见 UI（用户"双击没反应"主因）
         setupStatusItem()
+
+        setupReportCenter()
 
         // 应用持久化的诊断日志开关（设置页可开启；日志落 /tmp/touchpad_run.log）
         if UserDefaults.standard.bool(forKey: "engine.debugLogging") {
@@ -326,6 +337,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
                                       action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        // 报告问题：设置窗口打不开/渲染异常时的唯一逃生通道，必须常驻菜单栏
+        let reportItem = NSMenuItem(title: L10n.tr("报告问题…", "Report a Problem…"),
+                                    action: #selector(openManualReport), keyEquivalent: "")
+        reportItem.target = self
+        menu.addItem(reportItem)
         menu.addItem(.separator())
         // 触控板状态行：初始化中 → 就绪 / 失败（失败时提供「重试」）
         statusMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -333,6 +349,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         retryMenuItem = NSMenuItem(title: L10n.tr("重试初始化", "Retry trackpad"),
                                    action: #selector(retryTrackpad), keyEquivalent: "")
         menu.addItem(retryMenuItem!)
+        // 触控板起不来时，用户最想反馈的就是这件事——上下文直达，不用再进设置页
+        reportTrackpadItem = NSMenuItem(title: L10n.tr("报告此问题…", "Report This Problem…"),
+                                        action: #selector(openManualReport), keyEquivalent: "")
+        reportTrackpadItem?.target = self
+        menu.addItem(reportTrackpadItem!)
         menu.addItem(.separator())
         menu.addItem(withTitle: L10n.tr("退出", "Quit"), action: #selector(quit), keyEquivalent: "q")
         statusItem?.menu = menu
@@ -354,6 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
 
         guard mt_init() == 0 else {
             setTrackpadStatus(L10n.tr("触控板初始化失败", "Trackpad init failed"), retryable: true)
+            ReportCenter.shared.report(domain: "com.touchpad.trackpad", code: "mt_init_failed",
+                                       message: "MultitouchSupport 初始化失败（mt_init 返回非 0）")
             return
         }
         deviceCount = mt_scan_devices_array(&touchArrayPtr)
@@ -361,10 +384,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
             setTrackpadStatus(L10n.tr("未检测到触控板（请在系统设置中授予「输入监控」权限）",
                                      "No trackpad detected (grant Input Monitoring in System Settings)"),
                               retryable: true)
+            ReportCenter.shared.report(domain: "com.touchpad.trackpad", code: "no_device",
+                                       message: "未检测到触控板设备（设备数为 0）")
             return
         }
         guard let dev = mt_device_at_index(arr, 0) else {
             setTrackpadStatus(L10n.tr("触控板设备无效", "Invalid trackpad device"), retryable: true)
+            ReportCenter.shared.report(domain: "com.touchpad.trackpad", code: "invalid_device",
+                                       message: "触控板设备句柄无效（mt_device_at_index 返回 nil）")
             return
         }
         firstDev = dev
@@ -378,16 +405,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         trackpadReady = true
         setTrackpadStatus(L10n.tr("触控板就绪（\(deviceCount) 个设备）", "Trackpad ready (\(deviceCount) devices)"),
                           retryable: false)
+        // 权限显示正常但触控板起不来：把权限状态一起带上，便于判断是不是 TCC 不一致
+        if !permissionManager.accessibility.isOK {
+            ReportCenter.shared.report(
+                domain: "com.touchpad.permission", code: "accessibility_not_granted",
+                message: "辅助功能未授权——手势可以识别但无法调节系统音量/亮度",
+                severity: .warning)
+        }
     }
 
     private func setTrackpadStatus(_ text: String, retryable: Bool) {
         statusMenuItem?.title = text
         retryMenuItem?.isHidden = !retryable
+        // 「报告此问题」只在失败时出现，避免菜单噪音
+        reportTrackpadItem?.isHidden = !retryable
     }
 
     @objc private func retryTrackpad() {
         setupTrackpad()
     }
+
+    // MARK: - 上报中心
+
+    /// 把环境快照、holding 状态、窗口呈现方式注入 ReportCenter
+    private func setupReportCenter() {
+        let center = ReportCenter.shared
+
+        center.hostProvider = { [weak self] in
+            guard let self else {
+                return DiagnosticsCollector.HostInfo(
+                    appVersion: ScopeBuild.appVersion, appBuild: ScopeBuild.appBuild,
+                    deviceID: 0, deviceCount: 0, trackpadReady: false,
+                    accessibilityOK: false, inputMonitoringOK: false,
+                    engineRunning: false, engineHolding: false, engineIdleSlowed: false,
+                    language: .system, config: AppConfig(),
+                    uptime: ProcessInfo.processInfo.systemUptime)
+            }
+            return DiagnosticsCollector.HostInfo(
+                appVersion: self.appVersion,
+                appBuild: self.appBuild,
+                deviceID: self.trackpadDeviceID,
+                deviceCount: self.trackpadDeviceCount,
+                trackpadReady: self.trackpadReady,
+                accessibilityOK: self.permissionManager.accessibility.isOK,
+                inputMonitoringOK: self.permissionManager.inputMonitoring.isOK,
+                engineRunning: self.engineIsRunning,
+                engineHolding: self.engine.holdingCount > 0,
+                engineIdleSlowed: self.engine.isClockSlowed,
+                language: self.appSettings.language,
+                config: self.config,
+                uptime: ProcessInfo.processInfo.systemUptime)
+        }
+
+        // 手势进行中不弹窗（抢焦点会打断音量/亮度滑动）
+        center.isHoldingProvider = { [weak self] in
+            self?.engine.holdingCount ?? 0 > 0
+        }
+
+        center.presentHandler = { manual in
+            ReportWindowController.shared.show(manual: manual)
+        }
+
+        center.start()
+    }
+
+    @objc private func openManualReport() {
+        ReportWindowController.shared.show(manual: true)
+    }
+
 
     /// 单实例保护：返回 false 表示已有实例在运行
     private func ensureSingleInstance() -> Bool {
@@ -460,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         try? task.run()
     }
 
-    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.1.0" }
+    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.1.1" }
     var appBuild: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1" }
     var trackpadDeviceID: UInt64 { engine.deviceID }
     var trackpadDeviceCount: Int32 { deviceCount }
@@ -534,6 +619,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         engine.stop()
         // 防抖窗口内可能还有未落盘的配置修改 → 退出前强制刷盘，避免丢最后一次编辑
         ConfigStore.flushPendingSave()
+        // 正常退出：清会话标记，下次启动才不会误判为崩溃
+        markCleanExitIfPrimary()
         if let dev = firstDev { mt_stop_touch(dev) }
         mt_release_devices_array(touchArrayPtr)   // 归还设备 CFArray（quit 前释放）
         touchArrayPtr = nil
@@ -549,6 +636,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     func applicationWillTerminate(_ notification: Notification) {
         engine.stop()
         ConfigStore.flushPendingSave()
+        // 这里也会在 ⌘Q / 注销时走到：清标记，避免把正常关闭误报成崩溃
+        markCleanExitIfPrimary()
+    }
+
+    /// 只有真正装了崩溃捕获的（主）实例才有资格清会话标记——
+    /// 否则第二实例退出时会把主实例的标记删掉，导致真正的崩溃被漏报。
+    private func markCleanExitIfPrimary() {
+        guard crashCatcherInstalled else { return }
+        CrashCatcher.markCleanExit()
+        crashCatcherInstalled = false
     }
 
     func updateConfig(_ newConfig: AppConfig) {

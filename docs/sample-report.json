@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "report": {
+    "id": "8f14e45fceea167a5a36dedd4bea2543",
+    "created_at": "2026-10-19T20:23:03+08:00",
+    "trigger": "crash",
+    "severity": "error",
+    "fingerprint": "sha256:9c1f4d2a77e0b3c5a1d8e6f40b27c93e5a6d8f1b2c3e4d5a6b7c8d9e0f1a2b3c",
+    "occurred_at": "2026-10-19T20:21:55+08:00",
+    "app_uptime_seconds": 812.4,
+    "previous_session_crashed": true
+  },
+  "scope": {
+    "project": "touchpad-gestures",
+    "channel": "release",
+    "bundle_id": "com.zekiwithcat.TouchpadGestures",
+    "app_version": "2.1.1",
+    "app_build": "1",
+    "schema_version": 1
+  },
+  "errors": [
+    {
+      "fingerprint": "sha256:9c1f4d2a77e0b3c5a1d8e6f40b27c93e5a6d8f1b2c3e4d5a6b7c8d9e0f1a2b3c",
+      "domain": "com.touchpad.graph",
+      "code": "invalid_graph",
+      "message": "手势「左侧Force」的图非法，已回退空执行器",
+      "count": 3,
+      "first_seen": "2026-10-19T12:03:11+08:00",
+      "last_seen": "2026-10-19T12:07:42+08:00",
+      "stack": [
+        "GraphEvaluator.init(timeline:)",
+        "GestureEngine.runtime(for:)"
+      ],
+      "context": {
+        "gesture": "左侧Force",
+        "nodes": 17,
+        "edges": 19
+      }
+    },
+    {
+      "fingerprint": "sha256:11aa22bb33cc44dd55ee66ff77889900aabbccddeeff00112233445566778899",
+      "domain": "com.touchpad.trackpad",
+      "code": "haptic_device_unavailable",
+      "message": "触觉设备 ID 为 0，震动被跳过",
+      "count": 12,
+      "first_seen": "2026-10-19T12:02:04+08:00",
+      "last_seen": "2026-10-19T12:07:51+08:00",
+      "stack": [],
+      "context": {}
+    }
+  ],
+  "environment": {
+    "os_version": "macOS 15.1 (24B83)",
+    "arch": "arm64",
+    "model": "Mac14,2",
+    "locale": "zh-Hans-CN",
+    "language": "zh",
+    "permissions": {
+      "accessibility": "granted",
+      "input_monitoring": "unknown"
+    },
+    "trackpad": {
+      "device_id": 1234567890,
+      "device_count": 1,
+      "ready": true
+    },
+    "engine": {
+      "running": true,
+      "holding": false,
+      "idle_slowed": true
+    },
+    "config": {
+      "gestures": 6,
+      "events": 5,
+      "regions": 6,
+      "version": 3
+    }
+  },
+  "user": {
+    "description": "左侧 Force 按压后音量不变化",
+    "steps": "重按左边缘保持 1 秒后上下滑动",
+    "contact": ""
+  },
+  "consent": {
+    "granted": true,
+    "collected": ["environment", "errors", "logs", "crash"],
+    "excluded": ["config"]
+  },
+  "logs": "[12:03:11.004] [ENGINE] 进入 holding: 左侧Force\n[12:03:11.020] [ENGINE] triggerHaptic 跳过：deviceID 为 0（触觉设备不可用）\n[12:07:42.118] [ENGINE] 退出 holding: 左侧Force\n",
+  "crash": "Signal: SIGSEGV (bad memory access) at 2026-10-19 12:07:55\npid: 48123\n"
+}

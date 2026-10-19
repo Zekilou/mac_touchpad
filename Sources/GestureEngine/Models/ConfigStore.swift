@@ -236,9 +236,16 @@ public enum ConfigStore {
             try FileManager.default.moveItem(at: src, to: backup)
             fputs("[Config] 配置损坏（\(reason)）→ 已备份为 \(backup.lastPathComponent)，"
                   + "本次以默认配置启动。原配置未被删除，可人工恢复。\n", stderr)
+            DiagnosticsBus.config("config_corrupted",
+                                  "配置文件损坏，已备份为 \(backup.lastPathComponent) 并以默认配置启动",
+                                  context: ["reason": reason,
+                                            "backup": backup.lastPathComponent])
         } catch {
             fputs("[Config] 配置损坏（\(reason)）且备份失败：\(error)。"
                   + "为安全起见保留原文件不动。\n", stderr)
+            DiagnosticsBus.config("config_corrupt_backup_failed",
+                                  "配置文件损坏且备份失败：\(error.localizedDescription)",
+                                  context: ["reason": reason])
         }
     }
 
@@ -324,6 +331,8 @@ public enum ConfigStore {
             data = try JSONEncoder().encode(config)
         } catch {
             fputs("[Config] 保存失败（编码错误，可能是 NaN/Inf 参数）：\(error)\n", stderr)
+            DiagnosticsBus.config("config_encode_failed",
+                                  "配置保存失败（编码错误，可能是 NaN/Inf 参数）：\(error.localizedDescription)")
             return false
         }
         do {
@@ -331,6 +340,8 @@ public enum ConfigStore {
             return true
         } catch {
             fputs("[Config] 保存失败（写入错误）：\(error)\n", stderr)
+            DiagnosticsBus.config("config_write_failed",
+                                  "配置保存失败（写入错误）：\(error.localizedDescription)")
             return false
         }
     }
@@ -455,12 +466,15 @@ public enum ConfigStore {
         guard mayPersist else { return }
         guard let data = try? JSONEncoder().encode(config) else {
             fputs("[Config] 保存默认配置失败（编码错误）\n", stderr)
+            DiagnosticsBus.config("default_encode_failed", "保存默认配置失败（编码错误）")
             return
         }
         do {
             try data.write(to: userDefaultURL, options: .atomic)
         } catch {
             fputs("[Config] 保存默认配置失败（写入错误）：\(error)\n", stderr)
+            DiagnosticsBus.config("default_write_failed",
+                                  "保存默认配置失败（写入错误）：\(error.localizedDescription)")
         }
     }
 

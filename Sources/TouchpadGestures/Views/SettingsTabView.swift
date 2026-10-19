@@ -6,6 +6,7 @@ import GestureEngine
 struct SettingsTabView: View {
     @Binding var config: AppConfig
     @ObservedObject var appDelegate: AppDelegate
+    @ObservedObject private var reportCenter = ReportCenter.shared
     @State private var showRestoreFactoryAlert = false
     @State private var showSavedAsDefault = false
     @State private var showDiagAlert = false
@@ -236,59 +237,61 @@ struct SettingsTabView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    #if DEBUG
-                    // 诊断模块（仅 DEBUG 构建显示——正式版不含）
-                    Card(title: L10n.tr("诊断（开发版）", "Diagnostics (Dev)")) {
+                    // 反馈与诊断（正式版可用）
+                    Card(title: L10n.tr("反馈与诊断", "Feedback & Diagnostics")) {
                         HStack {
-                            Text(L10n.tr("环境信息", "Environment")).frame(width: 150, alignment: .leading)
+                            Text(L10n.tr("自动收集错误", "Collect errors automatically"))
+                                .frame(width: 150, alignment: .leading)
                             Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyEnvironment) as? Bool ?? true },
-                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyEnvironment) }
+                                get: { reportCenter.autoCollectEnabled },
+                                set: { reportCenter.setAutoCollect($0) }
                             )).labelsHidden().toggleStyle(.switch)
                             Spacer()
                         }
-                        HStack {
-                            Text(L10n.tr("配置副本 (config.json)", "Config copy (config.json)")).frame(width: 150, alignment: .leading)
-                            Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyConfig) as? Bool ?? true },
-                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyConfig) }
-                            )).labelsHidden().toggleStyle(.switch)
-                            Spacer()
-                        }
-                        HStack {
-                            Text(L10n.tr("引擎日志", "Engine logs")).frame(width: 150, alignment: .leading)
-                            Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyLogs) as? Bool ?? true },
-                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyLogs) }
-                            )).labelsHidden().toggleStyle(.switch)
-                            Spacer()
-                        }
-                        HStack {
-                            Text(L10n.tr("崩溃日志", "Crash logs")).frame(width: 150, alignment: .leading)
-                            Toggle("", isOn: Binding(
-                                get: { UserDefaults.standard.object(forKey: DiagnosticsModule.keyCrash) as? Bool ?? true },
-                                set: { UserDefaults.standard.set($0, forKey: DiagnosticsModule.keyCrash) }
-                            )).labelsHidden().toggleStyle(.switch)
-                            Spacer()
-                        }
-                        HStack {
+                        Text(L10n.tr("开启后只在本地记录崩溃与错误；发送前一定会先问你。",
+                                    "When on, crashes and errors are kept locally. Nothing is sent without asking you first."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 8) {
+                            Button(L10n.tr("报告问题…", "Report a Problem…")) {
+                                ReportWindowController.shared.show(manual: true)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
                             Button(L10n.tr("导出诊断包…", "Export Diagnostics…")) {
                                 exportDiagnostics()
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
-                            let crashes = CrashCatcher.pendingCrashLogs().count
-                            if crashes > 0 {
-                                Text(L10n.tr("有 \(crashes) 条崩溃日志待导出", "\(crashes) crash log(s) pending"))
-                                    .font(.caption).foregroundStyle(.orange)
+
+                            Spacer()
+                        }
+
+                        HStack(spacing: 10) {
+                            if !reportCenter.issues.isEmpty {
+                                Label(L10n.tr("\(reportCenter.issues.count) 个问题待处理",
+                                              "\(reportCenter.issues.count) issue(s) pending"),
+                                      systemImage: "exclamationmark.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                            if reportCenter.pendingUploadCount > 0 {
+                                Label(L10n.tr("\(reportCenter.pendingUploadCount) 份报告待发送",
+                                              "\(reportCenter.pendingUploadCount) report(s) queued"),
+                                      systemImage: "arrow.up.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                             Spacer()
                         }
-                        Text(L10n.tr("导出后请将文件夹通过微信/邮件/飞书发送给开发者。此卡片仅开发版显示。",
-                                    "Export then send the folder to the developer via WeChat/Mail/Feishu. Dev build only."))
-                            .font(.caption).foregroundStyle(.secondary)
+
+                        Text(L10n.tr("报告发送到 \(ReportScope.endpoint.host ?? "debug.zeki.casa")，仅用于定位问题。",
+                                    "Reports are sent to \(ReportScope.endpoint.host ?? "debug.zeki.casa"), used only to diagnose issues."))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
-                    #endif
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -330,14 +333,12 @@ struct SettingsTabView: View {
             Text(L10n.tr("当前配置已保存为默认，重置全部时将恢复到此配置。",
                         "Current config saved as default. 'Reset All' will restore to this."))
         }
-        #if DEBUG
         .alert(L10n.tr("诊断包", "Diagnostics Package"),
                isPresented: $showDiagAlert) {
             Button(L10n.tr("好", "OK"), role: .cancel) {}
         } message: {
             Text(diagResult)
         }
-        #endif
     }
 
     /// 健康状态小标签（手势健康列表用）
@@ -351,10 +352,10 @@ struct SettingsTabView: View {
             .foregroundColor(color)
     }
 
-    // MARK: - 诊断导出（仅 DEBUG 构建）
+    // MARK: - 诊断导出（正式版可用）
 
-    #if DEBUG
     /// 选目录 → 生成诊断包文件夹 → 提示用户手动发送给开发者
+    /// 这是「不想上传」时的替代方案：内容与上报一致，只是走文件。
     private func exportDiagnostics() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -364,24 +365,14 @@ struct SettingsTabView: View {
         panel.message = L10n.tr("选择保存诊断包的文件夹", "Choose a folder to save the diagnostics package")
         panel.begin { resp in
             guard resp == .OK, let url = panel.url else { return }
-            let defaults = UserDefaults.standard
-            let env = DiagnosticsModule.environmentText(
-                deviceID: appDelegate.trackpadDeviceID,
-                deviceCount: appDelegate.trackpadDeviceCount,
-                inputMonitoringOK: appDelegate.permissionManager.inputMonitoring.isOK,
-                accessibilityOK: appDelegate.permissionManager.accessibility.isOK,
-                appVersion: appDelegate.appVersion,
-                appBuild: appDelegate.appBuild,
-                language: appDelegate.appSettings.language,
-                gestureNames: appDelegate.config.gestures.map(\.name),
-                eventCount: appDelegate.config.events.count,
-                regionCount: appDelegate.config.regions.count)
+            let host = reportCenter.hostInfo()
+            let env = host.map { DiagnosticsCollector.environmentText(from: $0) } ?? ""
             let configData = try? JSONEncoder().encode(appDelegate.config)
-            let files = DiagnosticsModule.writeDiagnostics(
+            let files = DiagnosticsExporter.writeDiagnostics(
                 to: url,
-                includeConfig: defaults.bool(forKey: DiagnosticsModule.keyConfig),
-                includeLogs: defaults.bool(forKey: DiagnosticsModule.keyLogs),
-                includeCrash: defaults.bool(forKey: DiagnosticsModule.keyCrash),
+                includeConfig: true,
+                includeLogs: true,
+                includeCrash: true,
                 environment: env,
                 configData: configData)
             diagResult = files.isEmpty
@@ -391,5 +382,4 @@ struct SettingsTabView: View {
             showDiagAlert = true
         }
     }
-    #endif
 }

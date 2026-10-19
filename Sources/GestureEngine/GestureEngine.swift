@@ -64,7 +64,7 @@ public final class GestureEngine {
     private var _holdingCount = 0
     private var _currentHoldingGestureName: String?
     /// 当前有手势在 holding（phase 变量 == 4）
-    var holdingCount: Int {
+    public var holdingCount: Int {
         get {
             holdingLock.lock()
             defer { holdingLock.unlock() }
@@ -114,9 +114,7 @@ public final class GestureEngine {
     }
 
     private func elog(_ msg: String) {
-        #if DEBUG
-        DiagnosticsLog.log(msg)   // 可插拔诊断：环形缓冲（导出诊断包用）
-        #endif
+        DiagnosticsLog.log(msg)   // 环形缓冲（上报模块 / 导出诊断包读取）
         // 引擎级 /tmp 日志：诊断最简模式或设置页「诊断日志」开关（forceDebugLogging）开启时写入
         guard Self.diagnosticMinimalTick || Self.forceDebugLogging else { return }
         EngineLog.append("[ENGINE] \(msg)")
@@ -440,7 +438,7 @@ public final class GestureEngine {
     }
 
     /// 诊断：当前帧循环是否已进入空载慢速（20Hz）
-    var isClockSlowed: Bool {
+    public var isClockSlowed: Bool {
         var slowed = false
         syncOnTickQueue { slowed = self.idleSlowed }
         return slowed
@@ -584,6 +582,12 @@ public final class GestureEngine {
             // 图非法（环/悬挂边）：退回空执行器，避免崩溃
             let empty = TimelineConfig(trigger: .onFirstTap)
             let ev = GraphEvaluator(timeline: empty)!
+            // 这是"手势静默失效"的高频根因，必须可上报（同一手势的图反复重建时按指纹聚合）
+            DiagnosticsBus.graph("invalid_graph",
+                                 "手势「\(gesture.name)」的图非法，已回退空执行器（该手势不会触发）",
+                                 context: ["gesture": gesture.name,
+                                           "nodes": String(gesture.timeline.nodes.count),
+                                           "edges": String(gesture.timeline.edges.count)])
             let rt = Runtime(evaluator: ev, store: StateStore(), wasHolding: wasHolding,
                              graph: gesture.timeline)
             runtimes[gesture.id] = rt
@@ -652,6 +656,10 @@ public final class GestureEngine {
         }
         guard deviceID != 0 else {
             EngineLog.append("[ENGINE] triggerHaptic 跳过：deviceID 为 0（触觉设备不可用）")
+            // 每次滑动都会命中，但按 domain|code 聚合后只是一条（计数递增），不刷屏
+            DiagnosticsBus.trackpad("haptic_device_unavailable",
+                                    "触觉设备 ID 为 0，震动被跳过（手势仍会执行，只是没有反馈）",
+                                    kind: .warning)
             return
         }
         let now = ProcessInfo.processInfo.systemUptime

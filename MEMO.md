@@ -1,5 +1,84 @@
 # 项目备忘录
 
+## v2.1.1 发布记录（2026-10-19）
+
+**主题**：错误自动上报 + 主动反馈（小版本：仅新增上报通道，无手势行为变更）。
+
+版本号 `2.1.0 → 2.1.1`：最右位递增（补丁号），因为本次只新增诊断/上报能力，
+手势识别、调节逻辑、配置格式均未变。
+
+- 契约：`docs/debug-upload-contract.md`（端点 `debug.zeki.casa/touchpad-gestures/v1/report`）
+- 上报模块：`Sources/TouchpadGestures/Diagnostics/`（正式版常驻，非 DEBUG 独占）
+- 测试：`Tests/ReportTests/` 40 个用例（含真实 HTTP 往返）
+- 本地验收：`swift run ReportProbe 8787`
+- 实测：`kill -SEGV` 后下次启动正确弹出崩溃报告窗口
+
+
+### 实现细节
+
+把「诊断模块只在开发版」改成**正式版常驻的上报通道**，并按项目作用域隔离。
+
+### 决策
+- **进正式版**：崩溃是最需要知道的信息。旧的 `#if DEBUG` 全包裹取消，
+  `Diagnostics/` 下模块 release/dev 都编译；区别只在 `scope.channel`（`release` / `dev`）。
+- **绝不上传静默**：任何一条报告都要用户在弹窗里点「发送」。这是硬约束，不提供关闭项。
+- **作用域**：`debug.zeki.casa` 会接多个软件的上报，**项目名进 URL 路径第一段**：
+  `POST https://debug.zeki.casa/touchpad-gestures/v1/report`，
+  同时冗余到 `X-Debug-Scope` 头与 body 的 `scope.project`。未知前缀直接拒绝。
+- **契约从简**：单个 JSON 文档，没有 multipart。数据的最终读者是人，`jq` 能看即可。
+  契约见 `docs/debug-upload-contract.md`，示例见 `docs/sample-report.json`。
+
+### 新增结构（`Sources/TouchpadGestures/Diagnostics/`）
+| 文件 | 职责 |
+|---|---|
+| `ReportScope.swift` | 端点 / scope / token / 限额 / 目录常量（含测试用 override） |
+| `ErrorReport.swift` | 契约数据模型、ISO8601 编解码、SHA256 稳定指纹 |
+| `DiagnosticsCollector.swift` | 环境快照、日志/崩溃采集、脱敏、组装文档 |
+| `ReportUploader.swift` | URLRequest 构造、状态码映射、重试、drafts/outbox 队列 |
+| `ReportCenter.swift` | 订阅引擎事件、按指纹聚合、去重、延迟弹窗、上传编排 |
+| `CrashCatcher.swift` | 会话标记、NSException/signal handler、面包屑 |
+| `ReportWindowController.swift` | 非激活 NSPanel（不抢焦点，不打断手势） |
+| `DiagnosticsExporter.swift` | 诊断包导出（不想联网时的替代路径） |
+
+`Sources/GestureEngine/DiagnosticsBus.swift`：引擎侧结构化事件总线（正式版常驻），
+让 `ConfigStore` / `GestureEngine` 的内部错误也能进上报链路，而不只是 App 层。
+
+### 弹窗策略（避免打扰）
+- 非激活浮动面板，不抢键盘焦点（滑音量时被抢焦点是硬伤）
+- 同指纹每会话最多一次；1.5s 内连续错误合并成一次
+- **手势 holding 中延后**：等手指离开 1s 后再弹
+- 「稍后」保留在本地；「不再提示」仅本会话静默
+
+### 捕获点
+崩溃（signal/NSException/异常退出）、配置损坏、配置保存失败、图非法回退、
+触控板 init/枚举/句柄失败、触觉设备不可用、辅助功能未授权。
+
+### 主动上报入口
+设置 →「反馈与诊断」卡片（主入口）、菜单栏「报告问题…」（设置页打不开时的逃生通道）、
+触控板初始化失败时菜单里的「报告此问题…」（上下文直达）。
+
+### 关键修复（实现过程中发现）
+1. **`static let` 缓存路径**：`CrashCatcher.diagnosticsDir` 及各文件名常量原先只求值一次，
+   测试 override 与换目录都不生效 → 全部改成计算属性。
+2. **第二实例删掉主实例的崩溃标记**：`install()` 原先在单实例检查之前执行，
+   第二实例退出时 `markCleanExit()` 会删掉正在运行那个实例的标记，真崩溃反而漏报。
+   现在单实例检查优先，且只有 `crashCatcherInstalled` 才允许清标记。
+3. **首次启动自报崩溃**：`install()` 先写标记再判断，会把自己刚写的标记当"上次崩溃"。
+   改为先判断、再写。
+4. **崩溃日志互相覆盖**：`O_TRUNC` → `O_APPEND` + pid 后缀。
+
+### 测试
+- `Tests/ReportTests/` 新增 38 个用例：指纹稳定性、脱敏、契约字段、请求头/幂等键、
+  队列与过期清理、崩溃标记状态机、总线聚合与订阅、**真实 HTTP 往返**（本机 server 收包校验）。
+- 验证：`swift build` / `-c release` 均通过；release 二进制含上报符号与错误码字符串。
+- 全量 `swift test`：243 + 38，其中 `IdlePowerTests` 3 个失败为**改动前既有**
+  （已在未改动工作树上复现，均为 400ms 采样间歇的时序用例，与本改无关）。
+
+### 本地验收
+`swift run ReportProbe 8787` → 起本地服务校验路径/头/幂等键/JSON 结构，
+配合 `ReportScope.endpointOverride` 可让 App 打到本地而非线上。
+
+
 ## v2.1.0 发布记录（2026-10-10）
 
 **主题**：自定义触觉波形（新功能）+ 系统性缺陷排查与修复（P0/P1/P2 共 20 项）。

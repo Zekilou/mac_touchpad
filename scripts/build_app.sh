@@ -2,7 +2,7 @@
 # 构建 TouchpadGestures.app 分发包
 # 用法:
 #   ./scripts/build_app.sh          → 正式版（release，无诊断模块）
-#   ./scripts/build_app.sh dev      → 开发版（debug，含诊断模块，版本号 2.1.0-dev）
+#   ./scripts/build_app.sh dev      → 开发版（debug，含诊断模块，版本号 2.1.1-dev）
 #   ./scripts/build_app.sh dev 输出目录
 #
 # -u：引用未定义变量直接报错（避免 rm -rf "$UNSET/..." 之类误删）
@@ -22,12 +22,12 @@ cd "$PROJECT_DIR"
 if [ "$MODE" = "dev" ]; then
     echo "==> [开发版] swift build (debug，含诊断模块)"
     swift build --disable-sandbox
-    VERSION="2.1.0-dev"
+    VERSION="2.1.1-dev"
     BUILD_NUM="$(date +%Y%m%d)"      # 日期构建号，区分不同 dev 包
 else
     echo "==> [正式版] swift build -c release（不含诊断模块）"
     swift build --disable-sandbox -c release
-    VERSION="2.1.0"
+    VERSION="2.1.1"
     BUILD_NUM="1"
 fi
 
