@@ -22,12 +22,12 @@ cd "$PROJECT_DIR"
 if [ "$MODE" = "dev" ]; then
     echo "==> [开发版] swift build (debug，含诊断模块)"
     swift build --disable-sandbox
-    VERSION="2.1.2-dev"
+    VERSION="2.1.3-dev"
     BUILD_NUM="$(date +%Y%m%d)"      # 日期构建号，区分不同 dev 包
 else
     echo "==> [正式版] swift build -c release（不含诊断模块）"
     swift build --disable-sandbox -c release
-    VERSION="2.1.2"
+    VERSION="2.1.3"
     BUILD_NUM="1"
 fi
 
@@ -83,10 +83,42 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 @zekiwithcat. All rights reserved.</string>
     <key>NSInputMonitoringUsageDescription</key>
-    <string>Touchpad Gestures 需要输入监控权限来读取触控板原始数据，用于识别自定义手势。</string>
+    <string>Touchpad Gestures reads raw trackpad data to recognize custom gestures.</string>
+    <!-- 系统级本地化：权限弹窗 / Finder 简介由系统读 .lproj/InfoPlist.strings。
+         主 plist 用英文兜底（CFBundleDevelopmentRegion=en），中文用户走
+         Resources/zh-Hans.lproj/InfoPlist.strings 里的译文。 -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
 </dict>
 </plist>
 EOF
+
+# ── 系统级本地化资源（.lproj）────────────────────────────────────────────
+# 应用内的 tr() 只覆盖自绘 UI；以下由 **系统** 渲染，只能走 .lproj：
+#   - 首次授权时弹出的系统对话框（NSInputMonitoringUsageDescription）
+#   - Finder「显示简介」里的名称/版本信息
+# 没有 .lproj 时系统会退回 development region 的字符串 —— 英文用户
+# 会在系统权限弹窗里看到一整句中文。
+echo "==> 生成 .lproj 本地化资源"
+mkdir -p "$APP_BUNDLE/Contents/Resources/en.lproj" \
+         "$APP_BUNDLE/Contents/Resources/zh-Hans.lproj"
+
+cat > "$APP_BUNDLE/Contents/Resources/en.lproj/InfoPlist.strings" <<'STRINGS'
+"CFBundleDisplayName" = "Touchpad Gestures";
+"CFBundleName" = "Touchpad Gestures";
+"NSInputMonitoringUsageDescription" = "Touchpad Gestures reads raw trackpad data to recognize custom gestures. This permission is optional — trackpad gestures work without it.";
+STRINGS
+
+cat > "$APP_BUNDLE/Contents/Resources/zh-Hans.lproj/InfoPlist.strings" <<'STRINGS'
+"CFBundleDisplayName" = "Touchpad Gestures";
+"CFBundleName" = "Touchpad Gestures";
+"NSInputMonitoringUsageDescription" = "Touchpad Gestures 需要输入监控权限来读取触控板原始数据，用于识别自定义手势。（可选项，不授权也能正常使用触控板手势）";
+STRINGS
 
 # PkgInfo
 printf "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
@@ -199,7 +231,9 @@ if [ -d "$DSYM_SRC" ]; then
         dwarfdump --uuid "$DWARF" 2>/dev/null > "$APP_BUNDLE/Contents/Resources/dSYM/UUID.txt" || true
     fi
 else
-    echo "[warn] 未找到 dSYM（$DSYM_SRC），崩溃报告将无法符号化"
+    # 变量用 ${} 括起来：`（$DSYM_SRC）` 里全角括号的 UTF-8 字节会被 bash 当成
+    # 变量名的一部分 → set -u 下报 "DSYM_SRC\xef: unbound variable" 直接中断打包
+    echo "[warn] 未找到 dSYM（${DSYM_SRC}），崩溃报告将无法符号化"
 fi
 
 # 解压后会出现 "已损坏" 提示：未签名 + com.apple.quarantine 属性导致 Gatekeeper 拦截

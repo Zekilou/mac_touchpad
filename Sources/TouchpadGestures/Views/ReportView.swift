@@ -289,8 +289,8 @@ struct ReportView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             } else {
-                Text((logs.isEmpty ? "" : "── 日志 ──\n" + logs)
-                     + (crash.isEmpty ? "" : "\n── 崩溃 ──\n" + crash))
+                Text((logs.isEmpty ? "" : L10n.tr("── 日志 ──\n", "── Logs ──\n") + logs)
+                     + (crash.isEmpty ? "" : L10n.tr("\n── 崩溃 ──\n", "\n── Crash ──\n") + crash))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(14)

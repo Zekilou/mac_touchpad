@@ -145,7 +145,9 @@ struct TimelineNodeView: View {
             let ins = node.params.moduleInputs?.count ?? 0
             let outs = node.params.moduleOutputs?.count ?? 0
             let note = node.params.note ?? ""
-            return note.isEmpty ? "\(ins)入 \(outs)出" : "\(ins)入 \(outs)出 · \(note)"
+            // 端口计数 + 用户备注：备注是用户自己写的，不翻译；计数文案双语
+            let counts = L10n.tr("\(ins)入 \(outs)出", "\(ins) in · \(outs) out")
+            return note.isEmpty ? counts : "\(counts) · \(note)"
         }
         return node.paramsSummary
     }

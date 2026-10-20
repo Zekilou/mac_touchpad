@@ -310,7 +310,8 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
             permissionManager: permissionManager,
             appVersion: appVersion,
             onFinish: { Self.markCompleted() })
-        let hosting = NSHostingView(rootView: view)
+        // 独立 hosting 根不订阅 AppDelegate → 用 LanguageRefresh 让切语言时重算文案
+        let hosting = NSHostingView(rootView: LanguageRefresh { view })
 
         // 普通窗口（需要键盘焦点走"继续"按钮），而不是非激活 panel：
         // 引导是用户主动要看的东西，这时候抢焦点是正确的

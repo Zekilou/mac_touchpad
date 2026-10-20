@@ -17,7 +17,7 @@ struct RegionTabView: View {
                     Card(title: L10n.tr("名称", "Name")) {
                         HStack {
                             Text(L10n.tr("区域名", "Region Name")).frame(width: 150, alignment: .leading)
-                            TextField("区域名", text: Binding(
+                            TextField(L10n.tr("区域名", "Region Name"), text: Binding(
                                 get: { config.regions[idx].name },
                                 set: { config.regions[idx].name = $0 }
                             ))
@@ -27,16 +27,18 @@ struct RegionTabView: View {
                     }
 
                     Card(title: L10n.tr("矩形坐标（归一化 0~1）", "Rectangle Coordinates (normalized 0~1)")) {
-                        sliderRow(L10n.tr("xMin", "xMin"),
+                        // 坐标轴标识符（xMin/xMax/yMin/yMax）中英一致，不走 tr()——
+                        // 否则会以「已翻译」计入覆盖率，掩盖真实缺口
+                        sliderRow("xMin",
                                   value: Binding(get: { config.regions[idx].xMin }, set: { config.regions[idx].xMin = $0 }),
                                   minVal: 0, maxVal: 1)
-                        sliderRow(L10n.tr("xMax", "xMax"),
+                        sliderRow("xMax",
                                   value: Binding(get: { config.regions[idx].xMax }, set: { config.regions[idx].xMax = $0 }),
                                   minVal: 0, maxVal: 1)
-                        sliderRow(L10n.tr("yMin", "yMin"),
+                        sliderRow("yMin",
                                   value: Binding(get: { config.regions[idx].yMin }, set: { config.regions[idx].yMin = $0 }),
                                   minVal: 0, maxVal: 1)
-                        sliderRow(L10n.tr("yMax", "yMax"),
+                        sliderRow("yMax",
                                   value: Binding(get: { config.regions[idx].yMax }, set: { config.regions[idx].yMax = $0 }),
                                   minVal: 0, maxVal: 1)
                     }

@@ -1,5 +1,77 @@
 # 项目备忘录
 
+## v2.1.3 发布记录（2026-10-20）
+
+**主题**：多语言（zh/en）修复 + 首次启动体验补齐 + 打包脚本 bug。
+版本号 `2.1.2 → 2.1.3`：修复与小改进，无配置格式变更。
+
+### 1. 语言切换不生效（P0）
+
+根因：`L10n.currentLanguage` 唯一赋值点是 `appSettings.didSet`，而**类 init 内对
+`@Published` 赋值不会触发 didSet** —— 存 `.en` 重启后仍按系统语言显示，直到用户
+碰一次语言选择器。
+
+这解释了它的间歇性：`applicationDidFinishLaunching` 里「登录项状态不一致时」会执行
+`appSettings.launchAtLogin = ...`（成员赋值，**会**触发 didSet），语言被顺带修正；
+状态一致时就不生效。用独立最小复现确认了该语义。
+
+修复：`AppDelegate.init` 里 `super.init()` 后显式同步。
+
+### 2. 菜单栏 / 引导窗 / 报告面板不随语言刷新
+
+- 菜单栏 `statusMenuItem` 原本存「算好的字符串」，切语言无从重算 → 改为
+  `TrackpadStatus` 语义枚举，用时才 `tr()`
+- 引导窗与报告面板是独立 `NSHostingView` 根、不引用 AppDelegate，没有可观察源 →
+  新增 `Views/LanguageRefresh.swift` 包裹，由 `.l10nLanguageDidChange` 驱动
+
+踩坑：首版用 `@State revision` 只写不读，SwiftUI 不认为依赖变化 ——
+通知收到、状态也写了、body 却不重建。改为由一个 `hidden` 文本承载 revision 参与构图
+（用 `.id` 会丢子视图 @State）。
+
+### 3. 系统级本地化（.lproj）
+
+`build_app.sh` 补 `CFBundleDevelopmentRegion=en`、`CFBundleLocalizations=[en,zh-Hans]`，
+并生成 `en.lproj` / `zh-Hans.lproj` 的 `InfoPlist.strings`。
+
+原因：应用内 `tr()` 只覆盖自绘 UI；系统权限弹窗、Finder 简介由**系统**渲染，
+没有 .lproj 时英文用户会看到整句中文。
+
+### 4. 裸中文 UI 字面量
+
+报告预览 `── 日志 ──`、区域名占位符、模块摘要 `n入 m出`、图标色板 10 个中文色名
+（顺带补 tooltip / 无障碍标签 —— 该数组此前只把名字当 `id`，从不渲染）。
+
+### 5. 打包脚本 bug：dev 构建一直是坏的
+
+`（$DSYM_SRC）` 中全角括号的 UTF-8 字节被 bash 当作变量名的一部分，
+`set -u` 下报 `DSYM_SRC\xef: unbound variable` 并中断。`./scripts/build_app.sh dev`
+一直失败（dev 模式下无 dSYM，必走 else 分支）。改用 `${DSYM_SRC}`。
+
+验证：`./scripts/build_app.sh dev /tmp/devout` 现在能完整产出 app + dmg。
+
+### 6. 守门测试（244 → 252）
+
+- `L10nSourceGuardTests`（扫源码）：英文侧含中文 / 双语插值数量不匹配 /
+  恒等假翻译 / 省略号混用 / **扫描器自检**（零命中会让上面几条假绿）。
+  三条已用临时注入的违规样本验证「会红」。
+- `I18nRenderTests`（渲染）：关键页 zh/en 不空白；**英文标签不得超过 150pt 定宽列**
+  （实测抓到 `"Collect errors automatically" = 166.4pt`，已改短）；
+  `LanguageRefresh` 收到通知必须重建 body。
+
+### 明确未做（需要设计，属下一批）
+
+- 节点标题 / 默认手势名 / 默认区域名仍是中文 → 英文界面下画布与下拉出现中文。
+  **前置条件**：先把 50+ 处「按 title 检索」改成稳定 `role`，否则标题一本地化，
+  Force 判定 / 基础设置写参数 / 自定义波形恢复会集体失效。
+- 诊断包文本与上报消息（`issue.message` 直接显示在报告窗口）。收件人是开发者，
+  建议统一英文 + `locale` 字段。
+- 英文复数 `issue(s)` / `report(s)`；基础设置页 Picker 标签重复（"Region  Region ⌄"）。
+
+### 测试
+
+全量 `swift test`：**252 全过**。
+
+
 ## v2.1.2 发布记录（2026-10-20）
 
 **主题**：面向"发给别人用"的四道坎（首次打开 / 图标 / 登录项 / 崩溃可诊断），
@@ -709,6 +781,38 @@ AFTER:  右侧/刻度震动  wf=5 count=2 intervalUs=133171   ← 逐字段一�
 
 - 审查中发现但**未修**（无功能影响或用户明确决策）：①Force 压力阈值 2.0 > mactic 注释 zP 上限 1.54（用户明确指定，实测可用，若后续 Force 失灵先查此值）；②module 每次执行重建 GraphEvaluator（性能可接受）；③exitPulse/holdingPulse 模块输出声明 unit 但实际传 int 状态值（执行器只看 valid，行为一致）；④每次退出 holding 触发一次 ConfigStore.save（trackedValue 不编码，无害）；⑤ScrollWheelCatcher/DragMonitor 的 excludeRect（paletteFrame .global 屏幕坐标）与 event.locationInWindow（窗口坐标）坐标系不一致——palette 内滚动可能被画布平移拦截，修复需坐标系换算且需真机验证，未动；⑥tick 信号源用 touches.first 的 normY（非 finger.active）——多指时 first 可能是手掌，但改 finger.normY 会让 size/区域闪断中断调节（v10.11 回归），单指场景正确，保持现状
 
+## i18n 排查与第 1 批修复（2026-10-20）——细节见上节 v2.1.3
+
+用户要求「完整排查本项目文本多语言支持程度」，聚焦 en/zh 二语。全量扫描 + 双语渲染复验后落地第一批（低风险项）。完整现状与约定见 [docs/i18n.md](docs/i18n.md)。
+
+### 排查结论（数据）
+
+- `L10n.tr` 调用点 **466**，唯一词条 **412**，分布在 **29** 个文件；`Sources` 下另有 **305** 处含中文字符串未走 `tr()`。
+- 305 处分类：日志/stderr 27（开发者可见，属有意）；迁移器节点标题 119 + 默认配置数据 33（持久化，**不能**简单套 tr）；按标题检索的硬编码 key 52；诊断/上报消息 32；残留 UI 字面量 42。
+- 质量面：462 对成对 `tr()` 中「英文含中文」「占位符不匹配」「参数顺序反」均为 **0**；翻译本身干净，缺口在覆盖面与运行时行为。
+
+### 已修
+
+1. **启动语言不生效（P0）**：`AppDelegate.init` 补 `L10n.currentLanguage = appSettings.language`。根因用独立最小复现确认：**类 init 内对 `@Published` 赋值不触发 didSet**。并解释了间歇性——`applicationDidFinishLaunching` 里 `appSettings.launchAtLogin = ...` 是成员赋值、会触发 didSet，登录项状态不一致时语言被顺带修好，一致时就不生效。
+2. **菜单栏不随语言刷新**：`statusMenuItem` 原本存「算好的字符串」，切语言无从重算。改为 `TrackpadStatus` 语义枚举（`initializing/failed/noDevice/invalidDevice/ready(devices:)/readyWithoutAccessibility`），用时才 `tr()`；`setupStatusItem` 拆出幂等的 `rebuildStatusMenu()`，由 `.l10nLanguageDidChange` 驱动。
+3. **引导窗/报告面板停在旧语言**：两者是独立 `NSHostingView` 根、不引用 AppDelegate，没有可观察源。新增 `Views/LanguageRefresh.swift` 包裹，并让报告面板标题单独订阅通知。**踩坑**：首版 `@State revision` 只写不读 → SwiftUI 不认为依赖变化，通知收到、状态也写了、body 却不重建。改为由一个 `hidden` 文本承载 revision 参与构图（用 `.id` 会丢子视图 @State）。
+4. **裸中文 UI 字面量**：报告预览 `── 日志 ── / ── 崩溃 ──`、区域名 `TextField` 占位符、模块摘要 `n入 m出`、App 图标色板 10 个中文色名（顺带补 tooltip/无障碍标签——此前该数组只把名字当 `id`，从不渲染）。
+5. **系统级本地化缺失**：`build_app.sh` 补 `CFBundleDevelopmentRegion=en`、`CFBundleLocalizations=[en,zh-Hans]`，并生成 `en.lproj` / `zh-Hans.lproj` 的 `InfoPlist.strings`。主 plist 的 `NSInputMonitoringUsageDescription` 改英文兜底。
+6. **省略号统一** `设置...` → `设置…`。
+7. **顺手修的既有构建 bug**：`build_app.sh` 第 234 行 `（$DSYM_SRC）` —— 全角括号的 UTF-8 字节被 bash 当作变量名的一部分，`set -u` 下报 `DSYM_SRC\xef: unbound variable` 并中断打包。**`./scripts/build_app.sh dev` 一直是坏的**（与本轮改动无关，已用 `git show HEAD` 确认原文件同样存在）。改用 `${DSYM_SRC}`。
+
+### 新增守门测试（8 条，244 → 252）
+
+`L10nSourceGuardTests`（扫源码）：英文侧含中文 / 双语插值数量不匹配 / 恒等假翻译 / 省略号混用 / **扫描器自检**（零命中时上面的测试会假绿）。三条均已用临时注入的违规样本验证「会红」。
+
+`I18nRenderTests`（渲染）：关键页 zh/en 不空白；**英文标签不得超过 150pt 定宽列**（实测抓到 `"Collect errors automatically" = 166.4pt`，已改为 `"Auto-collect errors"`）；`LanguageRefresh` 收到通知必须重建 body。
+
+### 明确未做（需要设计，属第 2 批）
+
+- 节点标题 / 默认手势名 / 默认区域名仍是中文 → 英文界面下画布与下拉出现中文。**前置条件**：先把 50+ 处「按 title 检索」改成稳定 `role`，否则标题一本地化，Force 判定 / 基础设置写参数 / 自定义波形恢复会集体失效。
+- 诊断包文本与上报消息（`issue.message` 直接显示在报告窗口）。收件人是开发者，建议统一英文 + `locale` 字段。
+- 英文复数 `issue(s)` / `report(s)`；基础设置页 Picker 标签重复显示（"Region  Region ⌄"）。
+
 ## 历史归档（2026-08-05）
 
 - 2026-08-01 前的全部开发记录已归档至 [docs/ARCHIVE.md](docs/ARCHIVE.md)：管线规划（M1~~M8 交付清单）、v6~~v9 节点化演进、v1.1.0 架构变更、技术路线（MultitouchSupport.framework）、UI 布局规范、运行方式与分发构建等。
@@ -727,7 +831,7 @@ AFTER:  右侧/刻度震动  wf=5 count=2 intervalUs=133171   ← 逐字段一�
 
 ### 中危
 
-1. **L10n 持久化语言启动不生效**（L10n.currentLanguage 唯一赋值点 = appSettings.didSet；AppDelegate.init 赋值不触发 didSet，启动无人同步 → 存 .en 重启后菜单/设置仍中文，直到再碰一次语言选择器）。修复：init 里 AppSettings.load() 后立即同步
+1. ~~**L10n 持久化语言启动不生效**~~ **已修**（根因：`L10n.currentLanguage` 唯一赋值点 = `appSettings.didSet`，而**类 `init` 内对 `@Published` 赋值不触发 `didSet`** → 存 .en 重启后按系统语言显示，直到碰一次设置项。已用独立最小复现确认该语义。修复：`AppDelegate.init` 里 `super.init()` 后显式同步。另外该缺陷**是间歇性的**：`applicationDidFinishLaunching` 里 `if appSettings.launchAtLogin != launchAtLoginIsRegistered { appSettings.launchAtLogin = ... }` 是成员赋值、会触发 didSet，登录项状态不一致时语言被「顺带」修正，一致时就不生效 —— 这解释了为什么没人稳定复现）
 2. **upgradeForcePress 用 waveform != 3 判定"旧图"**（GestureConfig L447/460）：用户关闭 Force 进入震动（haptic 节点缺失，nil != 3 为 true）或自定义波形 → 每次启动整图重建并强制回滚为 waveform 3。修复：区分"节点缺失=用户关闭"与"真旧结构"
 3. **touchSizeMax < 1.2 无版本门控**（ConfigStore L65-68）：用户合法设置 1.0\~1.19 每次启动被改回 1.35 并落盘。修复：绑定迁移标记只修一次
 4. **direct 模式每 tick 双读 IOKit/CoreAudio**（EventConfig.trackedCurrentValue + 写后 currentValue，120Hz tick 队列上 getBrightness 可阻塞数 ms）→ 调节不跟手。修复：direct 也基于 trackedValue 数学推进 + 低频校准
@@ -750,7 +854,7 @@ AFTER:  右侧/刻度震动  wf=5 count=2 intervalUs=133171   ← 逐字段一�
 
 - 死代码：PermissionStatus.color / TimelineCanvasMetrics.nodeHeight / TimelineCanvasView\.node(\_:) 无引用；reachableNodes 仅测试用
 
-- SettingsTabView 图标色板硬编码中文色名未走 L10n；动态色读 redComponent 依赖外观
+- ~~SettingsTabView 图标色板硬编码中文色名未走 L10n~~ **已修**（色名现走 L10n 并作为 tooltip/无障碍标签；此前该数组只把名字当 `id` 用、从不渲染，所以不是可见泄漏，但也没有任何量提示）；动态色读 redComponent 依赖外观（未修）
 
 - TimelineGraphView\.fitToContent 与 TimelineCanvasView 重复实现 3 份包围盒计算
 

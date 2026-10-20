@@ -189,17 +189,26 @@ struct SettingsTabView: View {
                     Card(title: L10n.tr("App 图标", "App Icon")) {
                         HStack {
                             Text(L10n.tr("颜色", "Color")).frame(width: 150, alignment: .leading)
+                            // 色块名称只当「id + tooltip」用（从不作为可见文字渲染），
+                            // 所以这里必须本地化：否则英文界面的 tooltip 是中文色名。
                             ForEach([
-                                (NSColor.white, "白"), (NSColor.black, "黑"),
-                                (NSColor.systemRed, "红"), (NSColor.systemOrange, "橙"),
-                                (NSColor.systemYellow, "黄"), (NSColor.systemGreen, "绿"),
-                                (NSColor.systemCyan, "青"), (NSColor.systemBlue, "蓝"),
-                                (NSColor.systemPurple, "紫"), (NSColor.systemPink, "粉"),
-                            ], id: \.1) { color, _ in
+                                (NSColor.white, L10n.tr("白", "White")),
+                                (NSColor.black, L10n.tr("黑", "Black")),
+                                (NSColor.systemRed, L10n.tr("红", "Red")),
+                                (NSColor.systemOrange, L10n.tr("橙", "Orange")),
+                                (NSColor.systemYellow, L10n.tr("黄", "Yellow")),
+                                (NSColor.systemGreen, L10n.tr("绿", "Green")),
+                                (NSColor.systemCyan, L10n.tr("青", "Cyan")),
+                                (NSColor.systemBlue, L10n.tr("蓝", "Blue")),
+                                (NSColor.systemPurple, L10n.tr("紫", "Purple")),
+                                (NSColor.systemPink, L10n.tr("粉", "Pink")),
+                            ], id: \.1) { color, name in
                                 Circle()
                                     .fill(Color(nsColor: color))
                                     .frame(width: 18, height: 18)
                                     .overlay(Circle().stroke(.separator, lineWidth: 0.5))
+                                    .help(name)
+                                    .accessibilityLabel(name)
                                     .onTapGesture {
                                         appDelegate.appSettings.appIconColorRed = Double(color.redComponent)
                                         appDelegate.appSettings.appIconColorGreen = Double(color.greenComponent)
@@ -240,7 +249,9 @@ struct SettingsTabView: View {
                     // 反馈与诊断（正式版可用）
                     Card(title: L10n.tr("反馈与诊断", "Feedback & Diagnostics")) {
                         HStack {
-                            Text(L10n.tr("自动收集错误", "Collect errors automatically"))
+                            // 英文侧必须是短文案：150pt 定宽列装不下 "Collect errors automatically"
+                            // （实测 166.4pt → 换行、与右侧 Toggle 错位）
+                            Text(L10n.tr("自动收集错误", "Auto-collect errors"))
                                 .frame(width: 150, alignment: .leading)
                             Toggle("", isOn: Binding(
                                 get: { reportCenter.autoCollectEnabled },

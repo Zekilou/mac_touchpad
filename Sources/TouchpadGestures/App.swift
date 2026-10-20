@@ -83,7 +83,7 @@ struct TouchpadGesturesApp: App {
         Settings { EmptyView() }
             .commands {
                 CommandGroup(replacing: .appSettings) {
-                    Button(L10n.tr("设置...", "Settings...")) {
+                    Button(L10n.tr("设置…", "Settings…")) {
                         appDelegate.openSettings()
                     }
                     .keyboardShortcut(",")
@@ -125,6 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         let cfg = ConfigStore.load()
         config = cfg
         super.init()
+        // 启动即把持久化语言写进 L10n。**必须在 init 里显式同步**：
+        // 类 init 内对 @Published 属性的赋值不触发 didSet（Swift 语义），
+        // 所以上面 `appSettings = AppSettings.load()` 不会走到 didSet 里的同步逻辑。
+        // 少了这一行 → 存了 .en 的用户重启后菜单/设置仍按系统语言显示，
+        // 直到碰一次设置项（didSet 被触发）才切换（旧缺陷，见 MEMO「L10n 持久化语言启动不生效」）。
+        L10n.currentLanguage = appSettings.language
         // 初始化选中项为首项，避免 TabView selection 为 nil 导致闪烁
         selectedGestureID = cfg.gestures.first?.id
         selectedEventID = cfg.events.first?.id
@@ -265,10 +271,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     private var statusMenuItem: NSMenuItem?
     private var retryMenuItem: NSMenuItem?
     private var reportTrackpadItem: NSMenuItem?
+    /// 菜单栏状态行的语义状态（而非算好的字符串）。
+    ///
+    /// 存状态、用时才 `tr()`，是为了让「切语言 → 重建菜单」能重新求值文案：
+    /// 存字符串的话，重建菜单也只会拿到旧语言的那份。
+    private enum TrackpadStatus {
+        case initializing
+        case failed
+        case noDevice
+        case invalidDevice
+        case ready(devices: Int32)
+        case readyWithoutAccessibility
+
+        var title: String {
+            switch self {
+            case .initializing:
+                return L10n.tr("触控板初始化中…", "Initializing trackpad…")
+            case .failed:
+                return L10n.tr("触控板初始化失败", "Trackpad init failed")
+            case .noDevice:
+                return L10n.tr("未检测到触控板", "No trackpad detected")
+            case .invalidDevice:
+                return L10n.tr("触控板设备无效", "Invalid trackpad device")
+            case .ready(let devices):
+                return L10n.tr("触控板就绪（\(devices) 个设备）",
+                               "Trackpad ready (\(devices) devices)")
+            case .readyWithoutAccessibility:
+                return L10n.tr("触控板就绪，但尚未授予「辅助功能」（手势无法调节系统）",
+                               "Trackpad ready, but Accessibility is not granted (gestures cannot control the system)")
+            }
+        }
+
+        /// 失败态才显示「重试」与「报告此问题」，避免菜单噪音
+        var isRetryable: Bool {
+            switch self {
+            case .initializing, .ready, .readyWithoutAccessibility: return false
+            case .failed, .noDevice, .invalidDevice: return true
+            }
+        }
+    }
+
+    private var trackpadStatus: TrackpadStatus = .initializing
     /// 本实例是否安装了崩溃捕获（只有主实例为 true）
     private var crashCatcherInstalled = false
     private var trackpadReady = false
     private var settingsWindow: NSWindow?
+    /// 语言切换通知的订阅（菜单栏文案重建用）
+    private var languageObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(appSettings.showInDock ? .regular : .accessory)
@@ -346,16 +395,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     }
 
     /// 创建菜单栏图标与菜单（先于触控板初始化——菜单栏图标必须始终可见）
+    ///
+    /// 菜单文案是 `tr()` 求值的结果，切语言后必须重建菜单才生效；
+    /// 由 `.l10nLanguageDidChange` 通知驱动 `rebuildStatusMenu()`。
     private func setupStatusItem() {
         guard statusItem == nil else { return }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyMenuBarIcon()
+        rebuildStatusMenu()
+        setTrackpadStatus(.initializing)
+        // 切语言 → 重建菜单（菜单项文案是 NSMenuItem.title，不走 SwiftUI 重绘）
+        languageObserver = NotificationCenter.default.addObserver(
+            forName: .l10nLanguageDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.rebuildStatusMenu()
+            self?.refreshReadyStatus()
+        }
+    }
+
+    /// 按当前语言重建整份菜单（幂等；保留 `trackpadStatus` 语义状态）
+    private func rebuildStatusMenu() {
+        guard statusItem != nil else { return }
         let menu = NSMenu()
         menu.addItem(withTitle: "Touchpad Gestures", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
         // 显式 target：不依赖响应链解析（响应链在无窗口场景可能解析到异常对象——
         // 历史崩溃 openSettings 内 objc_retain/objc_msgSend SIGSEGV 与此相关）
-        let settingsItem = NSMenuItem(title: L10n.tr("设置...", "Settings..."),
+        let settingsItem = NSMenuItem(title: L10n.tr("设置…", "Settings…"),
                                       action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -366,20 +432,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         menu.addItem(reportItem)
         menu.addItem(.separator())
         // 触控板状态行：初始化中 → 就绪 / 失败（失败时提供「重试」）
-        statusMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        menu.addItem(statusMenuItem!)
-        retryMenuItem = NSMenuItem(title: L10n.tr("重试初始化", "Retry trackpad"),
-                                   action: #selector(retryTrackpad), keyEquivalent: "")
-        menu.addItem(retryMenuItem!)
+        let status = NSMenuItem(title: trackpadStatus.title, action: nil, keyEquivalent: "")
+        statusMenuItem = status
+        menu.addItem(status)
+        let retry = NSMenuItem(title: L10n.tr("重试初始化", "Retry trackpad"),
+                               action: #selector(retryTrackpad), keyEquivalent: "")
+        retryMenuItem = retry
+        menu.addItem(retry)
         // 触控板起不来时，用户最想反馈的就是这件事——上下文直达，不用再进设置页
-        reportTrackpadItem = NSMenuItem(title: L10n.tr("报告此问题…", "Report This Problem…"),
+        let reportTrackpad = NSMenuItem(title: L10n.tr("报告此问题…", "Report This Problem…"),
                                         action: #selector(openManualReport), keyEquivalent: "")
-        reportTrackpadItem?.target = self
-        menu.addItem(reportTrackpadItem!)
+        reportTrackpad.target = self
+        reportTrackpadItem = reportTrackpad
+        menu.addItem(reportTrackpad)
         menu.addItem(.separator())
         menu.addItem(withTitle: L10n.tr("退出", "Quit"), action: #selector(quit), keyEquivalent: "q")
         statusItem?.menu = menu
-        setTrackpadStatus(L10n.tr("触控板初始化中…", "Initializing trackpad…"), retryable: false)
+        // 重建后重新应用可见性（重试/报告项只在失败态出现）
+        applyStatusVisibility()
     }
 
     /// 触控板初始化（失败不致命：菜单栏显示状态 + 提供重试；权限授权后自动重试）
@@ -396,7 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         mt_shutdown()
 
         guard mt_init() == 0 else {
-            setTrackpadStatus(L10n.tr("触控板初始化失败", "Trackpad init failed"), retryable: true)
+            setTrackpadStatus(.failed)
             ReportCenter.shared.report(domain: "com.touchpad.trackpad", code: "mt_init_failed",
                                        message: "MultitouchSupport 初始化失败（mt_init 返回非 0）")
             return
@@ -405,15 +475,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         guard deviceCount > 0, let arr = touchArrayPtr else {
             // 文案不再指向「输入监控」：触控板读取走 MultitouchSupport，不受 TCC 输入监控门控，
             // 提示用户去授予它只会误导（本 app 唯一必需的是辅助功能）。
-            setTrackpadStatus(L10n.tr("未检测到触控板",
-                                     "No trackpad detected"),
-                              retryable: true)
+            setTrackpadStatus(.noDevice)
             ReportCenter.shared.report(domain: "com.touchpad.trackpad", code: "no_device",
                                        message: "未检测到触控板设备（设备数为 0）")
             return
         }
         guard let dev = mt_device_at_index(arr, 0) else {
-            setTrackpadStatus(L10n.tr("触控板设备无效", "Invalid trackpad device"), retryable: true)
+            setTrackpadStatus(.invalidDevice)
             ReportCenter.shared.report(domain: "com.touchpad.trackpad", code: "invalid_device",
                                        message: "触控板设备句柄无效（mt_device_at_index 返回 nil）")
             return
@@ -438,13 +506,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
     private func refreshReadyStatus() {
         guard trackpadReady else { return }
         if permissionManager.accessibility.isOK {
-            setTrackpadStatus(L10n.tr("触控板就绪（\(deviceCount) 个设备）",
-                                      "Trackpad ready (\(deviceCount) devices)"),
-                              retryable: false)
+            setTrackpadStatus(.ready(devices: deviceCount))
         } else {
-            setTrackpadStatus(L10n.tr("触控板就绪，但尚未授予「辅助功能」（手势无法调节系统）",
-                                      "Trackpad ready, but Accessibility is not granted (gestures cannot control the system)"),
-                              retryable: false)
+            setTrackpadStatus(.readyWithoutAccessibility)
             ReportCenter.shared.report(
                 domain: "com.touchpad.permission", code: "accessibility_not_granted",
                 message: "辅助功能未授权——手势可以识别但无法调节系统音量/亮度",
@@ -452,10 +516,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         }
     }
 
-    private func setTrackpadStatus(_ text: String, retryable: Bool) {
-        statusMenuItem?.title = text
+    private func setTrackpadStatus(_ status: TrackpadStatus) {
+        trackpadStatus = status
+        statusMenuItem?.title = status.title
+        applyStatusVisibility()
+    }
+
+    /// 状态行相关的可见性（失败态才显示「重试 / 报告此问题」）
+    private func applyStatusVisibility() {
+        let retryable = trackpadStatus.isRetryable
         retryMenuItem?.isHidden = !retryable
-        // 「报告此问题」只在失败时出现，避免菜单噪音
         reportTrackpadItem?.isHidden = !retryable
     }
 
@@ -606,7 +676,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         return SMAppService.mainApp.status == .enabled
     }
 
-    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.1.2" }
+    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.1.3" }
     var appBuild: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1" }
     var trackpadDeviceID: UInt64 { engine.deviceID }
     var trackpadDeviceCount: Int32 { deviceCount }
@@ -682,6 +752,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         ConfigStore.flushPendingSave()
         // 正常退出：清会话标记，下次启动才不会误判为崩溃
         markCleanExitIfPrimary()
+        if let token = languageObserver {
+            NotificationCenter.default.removeObserver(token)
+            languageObserver = nil
+        }
         if let dev = firstDev { mt_stop_touch(dev) }
         mt_release_devices_array(touchArrayPtr)   // 归还设备 CFArray（quit 前释放）
         touchArrayPtr = nil

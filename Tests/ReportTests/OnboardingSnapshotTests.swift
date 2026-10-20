@@ -13,7 +13,7 @@ final class OnboardingSnapshotTests: XCTestCase {
         let perm = PermissionManager()
         let host = NSHostingView(rootView: OnboardingView(
             permissionManager: perm,
-            appVersion: "2.1.2",
+            appVersion: "2.1.3",
             onFinish: {}))
         host.frame = NSRect(x: 0, y: 0, width: 520, height: 460)
 

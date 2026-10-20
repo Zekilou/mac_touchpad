@@ -15,21 +15,38 @@ final class ReportWindowController: NSObject, NSWindowDelegate {
     static let shared = ReportWindowController()
 
     private var window: NSPanel?
+    /// 语言切换订阅（面板标题也要跟着换，否则英文界面顶着中文窗口名）
+    private var languageObserver: NSObjectProtocol?
 
     /// 窗口是否需要以「主动上报」形态打开（决定标题与空态文案）
     private(set) var isManual = false
+
+    private var panelTitle: String {
+        isManual
+            ? L10n.tr("报告问题", "Report a Problem")
+            : L10n.tr("出现了问题", "Something Went Wrong")
+    }
+
+    deinit {
+        if let token = languageObserver {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
 
     func show(manual: Bool) {
         isManual = manual
 
         if let window {
+            // 复用已有面板时也刷新标题（本次可能是不同形态）
+            window.title = panelTitle
             window.orderFrontRegardless()
             return
         }
 
         let view = ReportView(manual: manual)
             .environmentObject(ReportCenter.shared)
-        let hosting = NSHostingView(rootView: view)
+        // 独立 hosting 根不订阅 AppDelegate → 用 LanguageRefresh 让切语言时重算文案
+        let hosting = NSHostingView(rootView: LanguageRefresh { view })
         hosting.frame = NSRect(x: 0, y: 0, width: 460, height: 620)
 
         let panel = NSPanel(
@@ -37,9 +54,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate {
             styleMask: [.titled, .closable, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false)
-        panel.title = manual
-            ? L10n.tr("报告问题", "Report a Problem")
-            : L10n.tr("出现了问题", "Something Went Wrong")
+        panel.title = panelTitle
         panel.titlebarAppearsTransparent = true
         panel.isFloatingPanel = true
         panel.level = .floating
@@ -51,11 +66,21 @@ final class ReportWindowController: NSObject, NSWindowDelegate {
         panel.orderFrontRegardless()
 
         self.window = panel
+        languageObserver = NotificationCenter.default.addObserver(
+            forName: .l10nLanguageDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, let panel = self.window else { return }
+            panel.title = self.panelTitle
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
         // 关闭即视为「稍后」：错误保留在本地，可随时从设置页再发
         ReportCenter.shared.dismiss()
+        if let token = languageObserver {
+            NotificationCenter.default.removeObserver(token)
+            languageObserver = nil
+        }
         window = nil
     }
 
