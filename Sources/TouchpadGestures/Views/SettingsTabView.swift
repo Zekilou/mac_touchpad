@@ -266,6 +266,14 @@ struct SettingsTabView: View {
                             .buttonStyle(.bordered)
                             .controlSize(.small)
 
+                            Button(L10n.tr("使用引导…", "Getting Started…")) {
+                                OnboardingWindowController.shared.show(
+                                    permissionManager: appDelegate.permissionManager,
+                                    appVersion: appDelegate.appVersion)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
                             Spacer()
                         }
 

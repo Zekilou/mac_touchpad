@@ -1,4 +1,5 @@
 import SwiftUI
+import ServiceManagement
 import GestureEngine
 import mt_bridge
 import CoreGraphics
@@ -294,6 +295,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
 
         setupReportCenter()
 
+        // 用系统里的真实登录项状态校正设置（用户可能在系统设置里手动改过，
+        // 也可能上次 register 静默失败——UI 不能显示一个假的"已开启"）
+        if appSettings.launchAtLogin != launchAtLoginIsRegistered {
+            appSettings.launchAtLogin = launchAtLoginIsRegistered
+        }
+
         // 应用持久化的诊断日志开关（设置页可开启；日志落 /tmp/touchpad_run.log）
         if UserDefaults.standard.bool(forKey: "engine.debugLogging") {
             GestureEngine.forceDebugLogging = true
@@ -306,7 +313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         permissionManager.requestPermissionsOnLaunch()
         // 辅助功能授权后自动重试触控板初始化（无需重启 app）
         permissionManager.onAccessibilityGranted = { [weak self] in
-            self?.setupTrackpad()
+            guard let self else { return }
+            self.setupTrackpad()
+            // 触控板已就绪时 setupTrackpad 会早退，文案得在这里单独刷新
+            self.refreshReadyStatus()
         }
 
         // 注意：**不再在启动时自动执行 tccutil reset**。原实现在权限未授予时无条件清除
@@ -314,6 +324,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         // 「重置授权」现为设置页的显式按钮（ConfigView → autoResetAndReprompt()）。
 
         setupTrackpad()
+
+        // 首次启动引导：本 app 无 Dock 图标、无主窗口，不引导的话用户只会看到
+        // 菜单栏多个图标，不知道要授权、也不知道该在哪双击。
+        // 延后一拍，等权限轮询完成、触控板状态行已就绪。
+        if !OnboardingWindowController.hasCompleted {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self else { return }
+                OnboardingWindowController.shared.showIfFirstLaunch(
+                    permissionManager: self.permissionManager,
+                    appVersion: self.appVersion)
+            }
+        }
     }
 
     // 菜单栏 app 常驻：关闭（最后一个）设置窗口不应退出应用。
@@ -381,8 +403,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         }
         deviceCount = mt_scan_devices_array(&touchArrayPtr)
         guard deviceCount > 0, let arr = touchArrayPtr else {
-            setTrackpadStatus(L10n.tr("未检测到触控板（请在系统设置中授予「输入监控」权限）",
-                                     "No trackpad detected (grant Input Monitoring in System Settings)"),
+            // 文案不再指向「输入监控」：触控板读取走 MultitouchSupport，不受 TCC 输入监控门控，
+            // 提示用户去授予它只会误导（本 app 唯一必需的是辅助功能）。
+            setTrackpadStatus(L10n.tr("未检测到触控板",
+                                     "No trackpad detected"),
                               retryable: true)
             ReportCenter.shared.report(domain: "com.touchpad.trackpad", code: "no_device",
                                        message: "未检测到触控板设备（设备数为 0）")
@@ -403,10 +427,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         mt_start_touch(dev, touchCallback, ctxPtr)
         engine.start()
         trackpadReady = true
-        setTrackpadStatus(L10n.tr("触控板就绪（\(deviceCount) 个设备）", "Trackpad ready (\(deviceCount) devices)"),
-                          retryable: false)
-        // 权限显示正常但触控板起不来：把权限状态一起带上，便于判断是不是 TCC 不一致
-        if !permissionManager.accessibility.isOK {
+        refreshReadyStatus()
+    }
+
+    /// 刷新「触控板就绪」这行状态。
+    ///
+    /// 触控板起来 ≠ 能用：辅助功能未授予时手势能识别、能震动，但无法真正调节系统音量/亮度
+    /// （"有震动但数值不变"的典型原因）。因此就绪文案要区分这两种情况，
+    /// 并且在用户授权后（`onAccessibilityGranted`）重新调用，避免状态停在过期的警告上。
+    private func refreshReadyStatus() {
+        guard trackpadReady else { return }
+        if permissionManager.accessibility.isOK {
+            setTrackpadStatus(L10n.tr("触控板就绪（\(deviceCount) 个设备）",
+                                      "Trackpad ready (\(deviceCount) devices)"),
+                              retryable: false)
+        } else {
+            setTrackpadStatus(L10n.tr("触控板就绪，但尚未授予「辅助功能」（手势无法调节系统）",
+                                      "Trackpad ready, but Accessibility is not granted (gestures cannot control the system)"),
+                              retryable: false)
             ReportCenter.shared.report(
                 domain: "com.touchpad.permission", code: "accessibility_not_granted",
                 message: "辅助功能未授权——手势可以识别但无法调节系统音量/亮度",
@@ -525,27 +563,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Obse
         applyAppIcon()
     }
 
+    /// 登录时自动启动。
+    ///
+    /// 原实现走 `osascript` + System Events 脚本，问题有三：
+    ///   1. 需要「自动化」权限，用户得在系统设置里再授权一次；
+    ///   2. 脚本失败是完全静默的（`try? task.run()`），UI 勾了但实际没生效；
+    ///   3. macOS 13 起 Apple 的官方路径是 `SMAppService`。
+    ///
+    /// 现在改用 `SMAppService.mainApp`：无需额外权限，状态可读回，
+    /// 用户也能在「系统设置 → 通用 → 登录项」里看到并手动管理。
     func setLaunchAtLogin(_ enabled: Bool) {
-        let path: String
-        if Bundle.main.bundleURL.pathExtension == "app" {
-            path = Bundle.main.bundlePath
-        } else {
-            path = CommandLine.arguments[0]
+        guard #available(macOS 13.0, *) else { return }
+        let service = SMAppService.mainApp
+        do {
+            if enabled {
+                // 已注册时重复 register 会抛错，先判断
+                if service.status != .enabled { try service.register() }
+            } else {
+                if service.status == .enabled { try service.unregister() }
+            }
+        } catch {
+            // 失败要可见：把 UI 的开关拨回真实状态，并记录到诊断，
+            // 而不是让用户以为已经生效（原实现的静默失败正是问题所在）
+            fputs("[LaunchAtLogin] 设置失败: \(error)\n", stderr)
+            ReportCenter.shared.report(
+                domain: "com.touchpad.system", code: "launch_at_login_failed",
+                message: "设置登录启动失败：\(error.localizedDescription)",
+                severity: .warning)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let actual = self.launchAtLoginIsRegistered
+                if self.appSettings.launchAtLogin != actual {
+                    self.appSettings.launchAtLogin = actual
+                }
+            }
         }
-        let name = (path as NSString).lastPathComponent
-        let task = Process()
-        task.launchPath = "/usr/bin/osascript"
-        if enabled {
-            task.arguments = ["-e",
-                "tell application \"System Events\" to make login item at end with properties {path:\"\(path)\",hidden:false}"]
-        } else {
-            task.arguments = ["-e",
-                "tell application \"System Events\" to delete login item \"\(name)\""]
-        }
-        try? task.run()
     }
 
-    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.1.1" }
+    /// 系统里实际是否已注册为登录项（用于启动时校正 UI 状态）
+    var launchAtLoginIsRegistered: Bool {
+        guard #available(macOS 13.0, *) else { return false }
+        return SMAppService.mainApp.status == .enabled
+    }
+
+    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.1.2" }
     var appBuild: String { Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1" }
     var trackpadDeviceID: UInt64 { engine.deviceID }
     var trackpadDeviceCount: Int32 { deviceCount }

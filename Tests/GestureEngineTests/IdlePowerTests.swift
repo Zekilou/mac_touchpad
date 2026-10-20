@@ -16,15 +16,26 @@ final class IdlePowerTests: XCTestCase {
 
     private var tmpConfig: URL!
 
+    /// 喂帧用的横坐标：落在**默认右边缘**（xMin 0.8 / xMax 1.0）内部。
+    ///
+    /// 曾经这里直接写 0.92，而配置来源是「/tmp/cfgtest/config.json 存在就用它，否则用
+    /// 用户真实 config.json」——于是同一份代码在别人机器上会因用户把边缘调窄（例如
+    /// 0.9927~1.0）而失败，表现为"双击进不了 holding"，却与识别逻辑无关。
+    /// 现在配置由测试自己生成（见 setUp），坐标与之配套，并由
+    /// `testProbeCoordinateLiesInsideRightEdge` 锁死这个不变量。
+    static let probeX: Float = 0.92
+    /// 纵向中部：避开上/下边缘（y 0~0.2 / 0.8~1.0）
+    static let probeY: Float = 0.5
+
     override func setUpWithError() throws {
-        // 隔离：所有 load/save 都落在临时副本，绝不碰用户真实 config.json
-        let real = URL(fileURLWithPath: "/tmp/cfgtest/config.json")
-        let src = FileManager.default.fileExists(atPath: real.path) ? real : ConfigStore.configURL
+        // 隔离 + 确定性：不再读取 /tmp/cfgtest 或用户真实配置。
+        // 测试一旦依赖宿主机上的外部文件，结果就会随用户设置漂移（正是本文件曾经的 flaky 根因）。
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("idle_\(UUID().uuidString).json")
-        if FileManager.default.fileExists(atPath: src.path) {
-            try FileManager.default.copyItem(at: src, to: tmp)
-        }
+        // 写入一份全新的默认配置（默认右边缘 0.8~1.0，与 probeX 配套）
+        let defaultConfig = AppConfig()
+        let data = try JSONEncoder().encode(defaultConfig)
+        try data.write(to: tmp)
         tmpConfig = tmp
         ConfigStore.overrideConfigURL = tmp
         // finger 节点的边沿状态是进程级静态量，跨 test 残留会让 up 永不再触发
@@ -94,10 +105,10 @@ final class IdlePowerTests: XCTestCase {
 
     /// 一次"按下 → 移动 → 以指定帧收尾"，之后 MT 彻底静默（不再有任何 onTouchFrame）
     private func gestureThenSilence(_ engine: GestureEngine, ending: [mt_touch_t]) {
-        engine.onTouchFrame(touches: [touch(0.92, 0.5, state: 3)])
+        engine.onTouchFrame(touches: [touch(Self.probeX, Self.probeY, state: 3)])
         Thread.sleep(forTimeInterval: 0.04)
         for i in 0..<10 {
-            engine.onTouchFrame(touches: [touch(0.92, 0.5 + Float(i) * 0.004, state: 4)])
+            engine.onTouchFrame(touches: [touch(Self.probeX, Self.probeY + Float(i) * 0.004, state: 4)])
             Thread.sleep(forTimeInterval: 0.01)
         }
         engine.onTouchFrame(touches: ending)
@@ -122,13 +133,52 @@ final class IdlePowerTests: XCTestCase {
                              "holding 阈值必须宽于常规阈值，否则滑动中会误判抬起")
     }
 
+    /// 不变量：喂帧坐标必须落在「右侧」手势绑定的区域内。
+    ///
+    /// 这条断言存在的理由是一次真实事故：本文件曾从 `/tmp/cfgtest/config.json` 或
+    /// 用户真实配置读取区域，而坐标写死 0.92。用户把右边缘调窄到 0.9927~1.0 后，
+    /// 0.92 落到区域外，双击根本不会触发——测试报「双击保持应进入 holding」，
+    /// 看起来像识别逻辑坏了，实际是坐标与配置不匹配。
+    ///
+    /// 现在配置由 setUp 自己生成，这条断言把"两者必须配套"钉死：以后谁改了
+    /// probeX 或默认区域，会在这里立刻失败，而不是变成一个 flaky 用例。
+    func testProbeCoordinateLiesInsideRightEdge() throws {
+        let config = ConfigStore.load()
+        let rightGesture = try XCTUnwrap(
+            config.gestures.first { $0.name == "右侧" },
+            "默认配置里应有「右侧」手势")
+        let regionID = try XCTUnwrap(rightGesture.boundRegionID,
+                                     "「右侧」手势应绑定区域")
+        let region = try XCTUnwrap(
+            config.regions.first { $0.id == regionID },
+            "绑定区域应存在")
+        XCTAssertTrue(rightGesture.enabled, "「右侧」手势默认应启用")
+
+        XCTAssertGreaterThanOrEqual(Self.probeX, region.xMin,
+                                    "probeX 必须 >= 区域左界 \(region.xMin)")
+        XCTAssertLessThanOrEqual(Self.probeX, region.xMax,
+                                 "probeX 必须 <= 区域右界 \(region.xMax)")
+        XCTAssertGreaterThanOrEqual(Self.probeY, region.yMin)
+        XCTAssertLessThanOrEqual(Self.probeY, region.yMax)
+
+        // 同时不得落进「其它区域」（上/下边缘等），否则喂帧会串到别的手势。
+        // 注意：同一区域内可以共存多个手势（例如「右侧」与「右侧Force」共用右边缘），
+        // 这里比较的是**区域**而不是手势名。
+        for other in config.regions where other.id != regionID {
+            let insideX = Self.probeX >= other.xMin && Self.probeX <= other.xMax
+            let insideY = Self.probeY >= other.yMin && Self.probeY <= other.yMax
+            XCTAssertFalse(insideX && insideY,
+                           "probe 坐标不得落在「\(other.name)」区域内（会串到该区域的手势）")
+        }
+    }
+
     /// 最后一帧含活动手指（state=4），随后 MT 静默。
     /// 引擎必须在陈旧阈值后视作无手指 → 回到空载跳帧。
     func testFrozenActiveFingerFrameReturnsToIdle() {
         let engine = makeEngine()
         defer { engine.stop() }
 
-        gestureThenSilence(engine, ending: [touch(0.92, 0.6, state: 4)])
+        gestureThenSilence(engine, ending: [touch(Self.probeX, 0.6, state: 4)])
 
         let d = engine.idleSkipDiagnosis()
         let pct = idleCPU()
@@ -144,7 +194,7 @@ final class IdlePowerTests: XCTestCase {
         defer { engine.stop() }
 
         gestureThenSilence(engine, ending: [
-            touch(0.92, 0.6, state: 4, size: 2.0, path: 1),
+            touch(Self.probeX, 0.6, state: 4, size: 2.0, path: 1),
             touch(0.10, 0.6, state: 4, size: 2.0, path: 2),
         ])
 
@@ -161,10 +211,10 @@ final class IdlePowerTests: XCTestCase {
         defer { engine.stop() }
 
         let endings: [(String, [mt_touch_t])] = [
-            ("state=6 tap", [touch(0.92, 0.5, state: 6)]),
-            ("state=4 touch", [touch(0.92, 0.5, state: 4)]),
-            ("state=1 start", [touch(0.92, 0.5, state: 1)]),
-            ("state=7 lift", [touch(0.92, 0.5, state: 7)]),
+            ("state=6 tap", [touch(Self.probeX, Self.probeY, state: 6)]),
+            ("state=4 touch", [touch(Self.probeX, Self.probeY, state: 4)]),
+            ("state=1 start", [touch(Self.probeX, Self.probeY, state: 1)]),
+            ("state=7 lift", [touch(Self.probeX, Self.probeY, state: 7)]),
             ("空帧", []),
         ]
         for (label, ending) in endings {
@@ -190,7 +240,7 @@ final class IdlePowerTests: XCTestCase {
         // 持续喂帧（模拟真实滑动），期间时钟不得进入慢速
         var sawSlow = false
         for i in 0..<30 {
-            engine.onTouchFrame(touches: [touch(0.92, 0.4 + Float(i) * 0.01, state: 4)])
+            engine.onTouchFrame(touches: [touch(Self.probeX, 0.4 + Float(i) * 0.01, state: 4)])
             if engine.isClockSlowed { sawSlow = true }
             Thread.sleep(forTimeInterval: 0.008)
         }
@@ -206,7 +256,7 @@ final class IdlePowerTests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.6)
         XCTAssertTrue(engine.isClockSlowed, "静默后应先进入慢速时钟")
 
-        engine.onTouchFrame(touches: [touch(0.92, 0.5, state: 3)])
+        engine.onTouchFrame(touches: [touch(Self.probeX, Self.probeY, state: 3)])
         Thread.sleep(forTimeInterval: 0.05)
         XCTAssertFalse(engine.isClockSlowed, "触摸到达后必须立刻恢复全速")
     }
@@ -223,7 +273,7 @@ final class IdlePowerTests: XCTestCase {
         let engine = makeEngine()
         defer { engine.stop() }
 
-        let x: Float = 0.92
+        let x: Float = Self.probeX
         func frame(_ t: [mt_touch_t], wait: Double = 0.012) {
             engine.onTouchFrame(touches: t)
             Thread.sleep(forTimeInterval: wait)
@@ -268,15 +318,15 @@ final class IdlePowerTests: XCTestCase {
         for _ in 0..<20 {
             let engine = makeEngine()
             // 制造活跃触摸（可能进入识别/holding 链）
-            engine.onTouchFrame(touches: [touch(0.92, 0.5, state: 3)])
-            engine.onTouchFrame(touches: [touch(0.92, 0.5, state: 4)])
+            engine.onTouchFrame(touches: [touch(Self.probeX, Self.probeY, state: 3)])
+            engine.onTouchFrame(touches: [touch(Self.probeX, Self.probeY, state: 4)])
             // 立刻 stop（此时 tickQueue 上很可能仍有排队的回调块）
             engine.stop()
             XCTAssertFalse(engine.isRunning, "stop 后 isRunning 必须为 false")
             XCTAssertEqual(engine.holdingCount, 0, "stop 必须清空 holding 计数")
             XCTAssertNil(engine.currentHoldingGestureName, "stop 必须清空 holding 手势名")
             // stop 之后喂帧：不得崩溃、不得复活引擎
-            engine.onTouchFrame(touches: [touch(0.92, 0.6, state: 4)])
+            engine.onTouchFrame(touches: [touch(Self.probeX, 0.6, state: 4)])
             Thread.sleep(forTimeInterval: 0.02)
             XCTAssertFalse(engine.isRunning, "stop 后到达的触摸帧不得重新启动引擎")
             engine.stop()   // 幂等
@@ -295,7 +345,7 @@ final class IdlePowerTests: XCTestCase {
         XCTAssertTrue(engine.isRunning, "start 后应恢复运行")
         Thread.sleep(forTimeInterval: 0.2)
 
-        let x: Float = 0.92
+        let x: Float = Self.probeX
         func frame(_ t: [mt_touch_t], wait: Double = 0.012) {
             engine.onTouchFrame(touches: t)
             Thread.sleep(forTimeInterval: wait)

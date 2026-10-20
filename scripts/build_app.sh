@@ -22,12 +22,12 @@ cd "$PROJECT_DIR"
 if [ "$MODE" = "dev" ]; then
     echo "==> [开发版] swift build (debug，含诊断模块)"
     swift build --disable-sandbox
-    VERSION="2.1.1-dev"
+    VERSION="2.1.2-dev"
     BUILD_NUM="$(date +%Y%m%d)"      # 日期构建号，区分不同 dev 包
 else
     echo "==> [正式版] swift build -c release（不含诊断模块）"
     swift build --disable-sandbox -c release
-    VERSION="2.1.1"
+    VERSION="2.1.2"
     BUILD_NUM="1"
 fi
 
@@ -104,19 +104,58 @@ trap 'rm -rf "$ICON_TMP"' EXIT
 
 cat > "$ICON_TMP/render_icon.swift" <<'SWIFT'
 import AppKit
+
+// 图标由两部分组成：深色圆角底 + 白色手势图形。
+//
+// 历史问题：原实现只把 SF Symbol 填成白色、没有底色，导出的是白线稿。
+// 在白底 Finder / Dock / 通知里几乎不可见，等于没有图标。
+// 现在固定深色底（#1C1C1E，接近系统深灰），保证在任何背景上都有对比度。
 let size = NSSize(width: 1024, height: 1024)
 let img = NSImage(size: size)
 img.lockFocus()
-let config = NSImage.SymbolConfiguration(pointSize: 700, weight: .regular)
+
+// macOS 图标惯例：留出约 10% 边距，主体是圆角矩形（非全出血）
+let inset: CGFloat = 100
+let bodyRect = NSRect(x: inset, y: inset,
+                      width: size.width - inset * 2,
+                      height: size.height - inset * 2)
+let corner = bodyRect.width * 0.2237   // 接近 macOS Big Sur+ 的圆角比例
+
+let path = NSBezierPath(roundedRect: bodyRect, xRadius: corner, yRadius: corner)
+
+// 轻微渐变，避免大块纯色显得扁平
+let gradient = NSGradient(colors: [
+    NSColor(calibratedRed: 0.16, green: 0.17, blue: 0.20, alpha: 1.0),
+    NSColor(calibratedRed: 0.09, green: 0.09, blue: 0.11, alpha: 1.0),
+])
+gradient?.draw(in: path, angle: -90)
+
+// 手势图形：白色，占底色约 62%
+//
+// 注意：不能用 `fill(using: .sourceAtop)` 去染白——那会把**整个矩形**填白，
+// 连刚画好的底色一起盖掉（曾经的 bug：导出图标变成一块白板）。
+// 正确做法是把图形单独渲染到一张透明小图，对该图的**非透明像素**上色，再合成。
+let config = NSImage.SymbolConfiguration(pointSize: 620, weight: .regular)
 if let symbol = NSImage(systemSymbolName: "hand.tap", accessibilityDescription: nil)?
     .withSymbolConfiguration(config) {
-    let r = NSRect(x: (size.width - symbol.size.width)/2,
-                   y: (size.height - symbol.size.height)/2,
-                   width: symbol.size.width, height: symbol.size.height)
-    symbol.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1.0)
+    let w = symbol.size.width
+    let h = symbol.size.height
+
+    let glyph = NSImage(size: NSSize(width: w, height: h))
+    glyph.lockFocus()
+    symbol.draw(in: NSRect(x: 0, y: 0, width: w, height: h),
+                from: .zero, operation: .sourceOver, fraction: 1.0)
+    // 只染这张小图的非透明部分
     NSColor.white.set()
-    NSRect(origin: .zero, size: size).fill(using: .sourceAtop)
+    NSRect(x: 0, y: 0, width: w, height: h).fill(using: .sourceAtop)
+    glyph.unlockFocus()
+
+    let r = NSRect(x: (size.width - w) / 2,
+                   y: (size.height - h) / 2,
+                   width: w, height: h)
+    glyph.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1.0)
 }
+
 img.unlockFocus()
 img.isTemplate = false
 
@@ -143,6 +182,24 @@ if [ "${ICON_OK:-1}" = "1" ] && [ -f "$ICON_PNG" ]; then
     done
     iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null || echo "[warn] iconutil 失败，跳过 icns"
     rm -rf "$ICONSET"
+fi
+
+# 把 dSYM 一起放进包里（Contents/Resources/dSYM）：
+# 崩溃上报只带得到栈地址，没有 dSYM 就无法把地址还原成函数名/行号。
+# 用户把这个文件夹连同报告一起给过来，就能定位到具体代码。
+DSYM_SRC="$PROJECT_DIR/.build/$([ "$MODE" = "dev" ] && echo debug || echo release)/$APP_NAME.dSYM"
+if [ -d "$DSYM_SRC" ]; then
+    echo "==> 收集 dSYM（崩溃符号化用）"
+    mkdir -p "$APP_BUNDLE/Contents/Resources/dSYM"
+    cp -R "$DSYM_SRC" "$APP_BUNDLE/Contents/Resources/dSYM/"
+    # 同时记录 UUID：服务端可用它匹配对应版本的 dSYM（符号文件无需随包分发）
+    DWARF="$APP_BUNDLE/Contents/Resources/dSYM/$APP_NAME.dSYM/Contents/Resources/DWARF/$APP_NAME"
+    if [ -f "$DWARF" ]; then
+        dwarfdump --uuid "$DWARF" 2>/dev/null | sed 's/^/    UUID: /' || true
+        dwarfdump --uuid "$DWARF" 2>/dev/null > "$APP_BUNDLE/Contents/Resources/dSYM/UUID.txt" || true
+    fi
+else
+    echo "[warn] 未找到 dSYM（$DSYM_SRC），崩溃报告将无法符号化"
 fi
 
 # 解压后会出现 "已损坏" 提示：未签名 + com.apple.quarantine 属性导致 Gatekeeper 拦截

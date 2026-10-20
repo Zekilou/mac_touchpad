@@ -14,7 +14,7 @@
     "project": "touchpad-gestures",
     "channel": "release",
     "bundle_id": "com.zekiwithcat.TouchpadGestures",
-    "app_version": "2.1.1",
+    "app_version": "2.1.2",
     "app_build": "1",
     "schema_version": 1
   },

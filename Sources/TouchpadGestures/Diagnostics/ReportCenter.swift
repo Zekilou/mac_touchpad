@@ -291,9 +291,15 @@ final class ReportCenter: ObservableObject {
             ? "上次运行时 App 异常退出"
             : "检测到未处理的崩溃日志"
 
+        // 带上 dSYM UUID：后端用它能匹配到对应版本的符号文件，把栈地址还原成代码行。
+        // 没有它，崩溃报告只是一堆十六进制地址，无法定位。
         addIssue(domain: "com.touchpad.crash", code: "previous_session_crash",
                  message: message, severity: .fatal,
-                 stack: [], context: ["crash_log_bytes": String(crashText.utf8.count)],
+                 stack: [], context: [
+                    "crash_log_bytes": String(crashText.utf8.count),
+                    "dsym_uuid": DSYMInfo.uuid ?? "unknown",
+                    "arch": DSYMInfo.arch,
+                 ],
                  time: Date())
 
         // 崩溃日志直接塞进文档，不等用户勾选（这是最有价值的证据）

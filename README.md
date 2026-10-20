@@ -79,11 +79,24 @@
 
 1. 前往 [Releases](https://github.com/Zekilou/mac_touchpad/releases/latest) 下载最新版 `TouchpadGestures.dmg`
 2. 双击挂载，把 `TouchpadGestures.app` 拖入「应用程序」
-3. 首次打开若被 Gatekeeper 拦截：**右键 →「打开」**
+3. 首次打开会被 Gatekeeper 拦下，按下面「首次打开」的步骤放行
 4. 在「系统设置 → 隐私与安全性 → 辅助功能」中启用 TouchpadGestures
 
-> 本 App 为 **ad-hoc 签名**（无 Apple 开发者证书），因此首次打开必须用「右键 → 打开」，
-> 直接双击会被 Gatekeeper 拦下。这是正常现象，不是文件损坏。
+> 本 App 为 **ad-hoc 签名**（无 Apple 开发者证书），首次打开会被 Gatekeeper 拦下。
+> 这是正常现象，不是文件损坏。
+
+#### 首次打开（macOS 15 Sequoia 及以上）
+
+Apple 已在 macOS 15 移除「右键 → 打开」这条放行路径，现在需要：
+
+1. 双击 App，弹出「无法验证开发者」→ 点「**完成**」（不是「移到废纸篓」）
+2. 打开「**系统设置 → 隐私与安全性**」，向下滚动到「安全性」区域
+3. 会看到「已阻止使用 TouchpadGestures…」→ 点「**仍要打开**」
+4. 输入登录密码，再在确认框里点「**仍要打开**」
+
+#### 首次打开（macOS 14 及更早）
+
+右键点击 `TouchpadGestures.app` → 选择「**打开**」→ 在弹窗里再点一次「**打开**」。
 
 ### 方式二：从源码构建
 
@@ -267,7 +280,19 @@ ad-hoc 签名的 App，TCC 按「路径 + 签名身份（CDHash）」匹配。�
 
 ### 显示「已损坏」或无法打开
 
-本 App 为 ad-hoc 签名，请**右键 →「打开」**，而不是直接双击。
+本 App 为 ad-hoc 签名的未公证包，首次打开会被 Gatekeeper 拦下。
+
+- **macOS 15+**：双击后点「完成」，然后去「系统设置 → 隐私与安全性」，在「安全性」区域点「**仍要打开**」
+- **macOS 14 及更早**：右键点击 App →「打开」，在弹窗里再点一次「打开」
+
+如果提示的是「**已损坏，应移到废纸篓**」（而不是「无法验证开发者」），说明下载时附加了隔离属性，
+可在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/TouchpadGestures.app
+```
+
+再重新打开。
 
 ### 滑动中调节中断 / 光标乱动
 

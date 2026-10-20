@@ -43,7 +43,7 @@ https://debug.zeki.casa/<其它项目>/v1/report
 | `X-Debug-Schema` | 是 | `1` |
 | `Idempotency-Key` | 是 | 等于 body 里的 `report.id`，重试时保持不变 |
 | `X-Client-Token` | 是 | 内置 token，当前值见 `Sources/TouchpadGestures/Diagnostics/ReportScope.swift`（服务端自行登记/轮换） |
-| `User-Agent` | 否 | `TouchpadGestures/2.1.1 (release)` |
+| `User-Agent` | 否 | `TouchpadGestures/2.1.2 (release)` |
 
 ---
 
@@ -87,7 +87,7 @@ scope 字符串目前只有 `touchpad-gestures`，后续新项目各自追加一
     "project": "touchpad-gestures",
     "channel": "release",                        // release | dev
     "bundle_id": "com.zekiwithcat.TouchpadGestures",
-    "app_version": "2.1.1",
+    "app_version": "2.1.2",
     "app_build": "1",
     "schema_version": 1
   },
